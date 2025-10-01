@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WaveAI - Système d'Agents IA (Hugging Face GRATUIT uniquement)
-Version: HF ONLY FINAL - Stabilité sur Render - CORRIGÉ
+WaveAI - Système d'Agents IA (Google Gemini ONLY)
+Version: GEMINI ONLY - Stabilité maximale
 """
 
 import os
@@ -10,9 +10,8 @@ import sqlite3
 import json
 import logging
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify
 import requests
-from functools import wraps
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -22,74 +21,35 @@ app = Flask(__name__)
 # Lit la clé secrète depuis l'environnement (SECRET_KEY)
 app.secret_key = os.environ.get('SECRET_KEY', 'waveai-secret-key-2024')
 
-# Configuration de la base de données
+# Configuration de la base de données (simplifiée)
 DATABASE_PATH = 'waveai.db'
 
+# Configuration de l'API Gemini
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}"
+
 class APIManager:
-    """Gestionnaire centralisé de l'API Hugging Face avec persistance et tests"""
+    """Gestionnaire simplifié pour la clé Gemini"""
     
     def __init__(self):
         self.init_database()
         self.test_results = {}
-        # Modèles Hugging Face de fallback (du plus accessible au moins accessible)
-        self.hf_models = [
-            {
-                'name': 'microsoft/DialoGPT-medium',
-                'url': 'https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium',
-                'description': 'DialoGPT Medium - Conversationnel'
-            },
-            {
-                'name': 'facebook/blenderbot-400M-distill',
-                'url': 'https://api-inference.huggingface.co/models/facebook/blenderbot-400M-distill',
-                'description': 'BlenderBot - Conversationnel'
-            },
-            {
-                'name': 'microsoft/DialoGPT-small',
-                'url': 'https://api-inference.huggingface.co/models/microsoft/DialoGPT-small',
-                'description': 'DialoGPT Small - Léger'
-            },
-            {
-                'name': 'gpt2',
-                'url': 'https://api-inference.huggingface.co/models/gpt2',
-                'description': 'GPT-2 - Génération de texte'
-            },
-            {
-                'name': 'google/flan-t5-base',
-                'url': 'https://api-inference.huggingface.co/models/google/flan-t5-base',
-                'description': 'FLAN-T5 Base - Question-réponse'
-            }
-        ]
-    
+        
     def init_database(self):
-        """Initialise la base de données SQLite"""
+        """Initialise la base de données SQLite (pour le statut et les logs)"""
         try:
             conn = sqlite3.connect(DATABASE_PATH)
             cursor = conn.cursor()
             
-            # Table pour les clés API (Gardée pour Hugging Face uniquement)
+            # Table pour la clé API Gemini
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS api_keys (
                     id INTEGER PRIMARY KEY,
                     provider TEXT UNIQUE NOT NULL,
                     api_key TEXT NOT NULL,
                     is_active BOOLEAN DEFAULT 1,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_tested TIMESTAMP,
-                    test_status TEXT DEFAULT 'untested',
-                    working_model TEXT
-                )
-            ''')
-            
-            # Table pour les logs de tests
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS test_logs (
-                    id INTEGER PRIMARY KEY,
-                    provider TEXT NOT NULL,
-                    test_type TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    response_data TEXT,
-                    error_message TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    test_status TEXT DEFAULT 'untested'
                 )
             ''')
             
@@ -98,12 +58,11 @@ class APIManager:
             logger.info("Base de données initialisée avec succès")
             
         except Exception as e:
-            # CORRECTION : Indentation correcte et bloc non vide
             logger.error(f"Erreur lors de l'initialisation de la base de données: {e}")
-            raise
+            # Ne pas faire de raise ici pour permettre au reste de l'app de continuer si la DB est problématique
     
     def save_api_key(self, provider, api_key):
-        """Sauvegarde une clé API dans la base de données (pour affichage/test)"""
+        """Sauvegarde la clé API Gemini"""
         try:
             conn = sqlite3.connect(DATABASE_PATH)
             cursor = conn.cursor()
@@ -123,14 +82,14 @@ class APIManager:
             logger.error(f"Erreur lors de la sauvegarde de la clé {provider}: {e}")
             return False
     
-    def get_api_key(self, provider):
+    def get_api_key(self, provider='gemini'):
         """
-        Récupère la clé API Hugging Face.
-        PRIORITÉ : 1. Variable d'Environnement (HUGGINGFACE_TOKEN) > 2. Base de Données
+        Récupère la clé API Gemini.
+        PRIORITÉ : 1. Variable d'Environnement (GEMINI_API_KEY) > 2. Base de Données
         """
-        if provider == 'huggingface':
+        if provider == 'gemini':
             # 1. Tenter de lire depuis la variable d'environnement (Render)
-            env_key = os.getenv('HUGGINGFACE_TOKEN')
+            env_key = os.getenv('GEMINI_API_KEY')
             if env_key:
                 return env_key
         
@@ -153,242 +112,204 @@ class APIManager:
             logger.error(f"Erreur lors de la récupération de la clé {provider}: {e}")
             return None
     
-    def get_all_api_keys(self):
-        """Récupère toutes les clés API actives (ici, seulement HF)"""
+    def get_api_status(self, provider='gemini'):
+        """Récupère le statut de l'API Gemini"""
         try:
             conn = sqlite3.connect(DATABASE_PATH)
             cursor = conn.cursor()
             
-            # Ne récupérer que Hugging Face
             cursor.execute('''
-                SELECT provider, api_key, test_status, last_tested, working_model 
+                SELECT api_key, test_status, last_tested 
                 FROM api_keys 
-                WHERE provider = 'huggingface' AND is_active = 1
-            ''')
+                WHERE provider = ?
+            ''', (provider,))
             
-            results = cursor.fetchall()
+            result = cursor.fetchone()
             conn.close()
             
-            keys = {}
-            for row in results:
-                keys[row[0]] = {
-                    'key': row[1],
-                    'status': row[2],
-                    'last_tested': row[3],
-                    'working_model': row[4]
-                }
+            key_from_db = result[0] if result else None
+            status = result[1] if result else 'missing'
+            last_tested = result[2] if result else None
+
+            # Vérifier l'ENV
+            key_from_env = os.getenv('GEMINI_API_KEY')
             
-            return keys
+            is_configured = (key_from_db is not None) or (key_from_env is not None)
+            key_to_display = key_from_db if key_from_db else key_from_env
+
+            return {
+                'configured': is_configured,
+                'key_preview': key_to_display[:8] + '...' if key_to_display and len(key_to_display) > 8 else (key_to_display if key_to_display else 'N/A'),
+                'status': status,
+                'last_tested': last_tested,
+                'model': GEMINI_MODEL
+            }
             
         except Exception as e:
-            logger.error(f"Erreur lors de la récupération des clés: {e}")
-            return {}
-    
-    def log_test_result(self, provider, test_type, status, response_data=None, error_message=None, working_model=None):
-        """Enregistre le résultat d'un test d'API"""
+            logger.error(f"Erreur statut APIs: {e}")
+            return {
+                'configured': False,
+                'key_preview': 'N/A',
+                'status': 'error',
+                'last_tested': None,
+                'model': GEMINI_MODEL
+            }
+
+    def log_test_result(self, provider, status):
+        """Mettre à jour le statut du test"""
         try:
             conn = sqlite3.connect(DATABASE_PATH)
             cursor = conn.cursor()
             
             cursor.execute('''
-                INSERT INTO test_logs (provider, test_type, status, response_data, error_message)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (provider, test_type, status, json.dumps(response_data) if response_data else None, error_message))
-            
-            # Mettre à jour le statut dans api_keys
-            cursor.execute('''
                 UPDATE api_keys 
-                SET test_status = ?, last_tested = CURRENT_TIMESTAMP, working_model = ?
+                SET test_status = ?, last_tested = CURRENT_TIMESTAMP
                 WHERE provider = ?
-            ''', (status, working_model, provider))
+            ''', (status, provider))
             
             conn.commit()
             conn.close()
             
         except Exception as e:
             logger.error(f"Erreur lors de l'enregistrement du test {provider}: {e}")
-            
-    def test_huggingface_api(self, api_key):
-        """Test complet de l'API Hugging Face avec modèles de fallback"""
-        headers = {"Authorization": f"Bearer {api_key}"}
+
+    def test_gemini_api(self):
+        """Test simple de l'API Gemini"""
+        api_key = self.get_api_key('gemini')
         
-        for model_info in self.hf_models:
-            try:
-                logger.info(f"Test du modèle HF: {model_info['name']}")
-                
-                # Adapter le payload selon le modèle
-                if 'gpt2' in model_info['name'].lower() or 'dialo' in model_info['name'].lower():
-                    payload = {
-                        "inputs": "Bonjour, comment allez-vous?",
-                        "parameters": {"max_new_tokens": 50, "temperature": 0.7}
-                    }
-                elif 'flan-t5' in model_info['name'].lower():
-                    payload = {
-                        "inputs": "Question: Qui êtes-vous? Réponse:",
-                        "parameters": {"max_new_tokens": 50}
-                    }
-                elif 'blenderbot' in model_info['name'].lower():
-                    payload = {
-                        "inputs": "Bonjour",
-                        "parameters": {"max_new_tokens": 50}
-                    }
-                
-                response = requests.post(
-                    model_info['url'], 
-                    headers=headers, 
-                    json=payload, 
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    
-                    generated_text = ""
-                    if isinstance(result, list) and len(result) > 0:
-                        if 'generated_text' in result[0]:
-                            generated_text = result[0]['generated_text']
-                        elif 'response' in result[0]:
-                            generated_text = result[0]['response']
-                    
-                    if generated_text and len(generated_text.strip()) > 5:
-                        test_data = {
-                            'model': model_info['name'],
-                            'description': model_info['description'],
-                            'test_response': generated_text[:100],
-                            'response_type': type(result).__name__
-                        }
-                        
-                        self.log_test_result('huggingface', 'complete', 'success', test_data, working_model=model_info['name'])
-                        return True, f"Hugging Face API fonctionnelle ({model_info['description']})", test_data
-                
-                elif response.status_code == 503:
-                    logger.info(f"Modèle {model_info['name']} en cours de chargement, test du suivant...")
-                    continue
-                else:
-                    logger.warning(f"Modèle {model_info['name']} échoué: {response.status_code}")
-                    continue
-                    
-            except Exception as e:
-                logger.warning(f"Erreur avec modèle {model_info['name']}: {e}")
-                continue
+        if not api_key:
+            self.log_test_result('gemini', 'missing')
+            return False, "Clé API Gemini introuvable.", None
         
-        # Aucun modèle n'a fonctionné
-        error_msg = f"Aucun des {len(self.hf_models)} modèles Hugging Face n'est accessible. Vérifiez votre token ou réessayez plus tard."
-        self.log_test_result('huggingface', 'complete', 'error', error_message=error_msg)
-        return False, error_msg, None
-    
-    def run_all_tests(self):
-        """Exécute les tests pour l'API Hugging Face uniquement."""
-        results = {}
-        # On utilise la clé la plus fiable (ENV ou DB)
-        hf_key = self.get_api_key('huggingface')
-        
-        if hf_key:
-            logger.info(f"Lancement du test pour Hugging Face...")
+        try:
+            logger.info(f"Test du modèle Gemini: {GEMINI_MODEL}")
             
-            success, message, data = self.test_huggingface_api(hf_key)
+            test_prompt = "Dis 'OK' et rien d'autre."
             
-            results['huggingface'] = {
-                'success': success,
-                'message': message,
-                'data': data,
-                'tested_at': datetime.now().isoformat()
+            url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
+            
+            payload = {
+                "contents": [
+                    {"role": "user", "parts": [{"text": test_prompt}]}
+                ],
+                "config": {
+                    "maxOutputTokens": 10,
+                    "temperature": 0.0
+                }
             }
-        else:
-            logger.warning("Clé Hugging Face non trouvée. Test non exécuté.")
-        
-        self.test_results = results
-        return results
+            
+            response = requests.post(url, json=payload, timeout=20)
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Extraction de la réponse pour Gemini
+                if 'candidates' in result and result['candidates']:
+                    text = result['candidates'][0]['content']['parts'][0]['text'].strip().upper()
+                    if 'OK' in text:
+                        self.log_test_result('gemini', 'success')
+                        return True, "API Gemini fonctionnelle.", None
+                
+                # Échec du test malgré le statut 200
+                self.log_test_result('gemini', 'error')
+                return False, f"API Gemini : Réponse inattendue. {response.text}", None
+
+            else:
+                error_msg = response.json().get('error', {}).get('message', 'Erreur HTTP inconnue')
+                logger.error(f"Erreur API Gemini ({response.status_code}): {error_msg}")
+                self.log_test_result('gemini', 'error')
+                return False, f"Erreur API Gemini ({response.status_code}): {error_msg}", None
+            
+        except requests.exceptions.Timeout:
+            self.log_test_result('gemini', 'error')
+            return False, "Délai d'attente de l'API Gemini dépassé.", None
+        except Exception as e:
+            logger.error(f"Erreur lors du test Gemini: {e}")
+            self.log_test_result('gemini', 'error')
+            return False, f"Erreur non gérée lors du test Gemini: {str(e)}", None
 
 # Instance globale du gestionnaire d'APIs
 api_manager = APIManager()
 
 class AIAgent:
-    """Agent IA avec intégration API Hugging Face et fallback intelligent"""
+    """Agent IA utilisant l'API Gemini"""
     
     def __init__(self, name, role, personality):
         self.name = name
         self.role = role
         self.personality = personality
     
-    def generate_response(self, message, user_context=None):
-        """Génère une réponse en utilisant Hugging Face (le seul supporté)"""
+    def generate_response(self, message):
+        """Génère une réponse en utilisant Gemini"""
         
-        # Contexte personnalisé pour l'agent
-        system_prompt = f"""Tu es {self.name}, {self.role}.
+        api_key = api_manager.get_api_key('gemini')
+        if not api_key:
+            return self._fallback_response()
+        
+        # Contexte personnalisé pour l'agent (System Instruction)
+        system_instruction = f"""Tu es {self.name}, {self.role}.
 Personnalité: {self.personality}
 Réponds de manière naturelle et personnalisée selon ton rôle.
-Garde tes réponses concises et utiles (max 200 mots).
-Message utilisateur: {message}"""
+Garde tes réponses concises et utiles (maximum 150 mots)."""
         
-        # 1. Essayer Hugging Face
-        hf_key = api_manager.get_api_key('huggingface')
-        if hf_key:
-            # Récupérer le modèle qui fonctionne depuis la DB (mis à jour par le test)
-            api_keys = api_manager.get_all_api_keys()
-            working_model = api_keys.get('huggingface', {}).get('working_model')
+        try:
+            url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
             
-            if working_model:
-                try:
-                    headers = {"Authorization": f"Bearer {hf_key}"}
-                    
-                    # Trouver l'URL du modèle qui fonctionne
-                    model_url = None
-                    for model_info in api_manager.hf_models:
-                        if model_info['name'] == working_model:
-                            model_url = model_info['url']
-                            break
-                    
-                    if model_url:
-                        # Adapter le prompt selon le modèle
-                        final_prompt = f"{system_prompt}\n\n{message}"
-                        if 'flan-t5' in working_model.lower():
-                            final_prompt = f"Question: {final_prompt} Réponse:"
-                        
-                        payload = {
-                            "inputs": final_prompt,
-                            "parameters": {"max_new_tokens": 150, "temperature": 0.7}
-                        }
-                        
-                        response = requests.post(model_url, headers=headers, json=payload, timeout=30)
-                        
-                        if response.status_code == 200:
-                            result = response.json()
-                            generated_text = ""
-                            
-                            if isinstance(result, list) and len(result) > 0:
-                                generated_text = result[0].get('generated_text', '')
-                            elif isinstance(result, dict):
-                                generated_text = result.get('generated_text', '')
-                            
-                            if generated_text:
-                                # Nettoyer la réponse
-                                if final_prompt in generated_text:
-                                    generated_text = generated_text.replace(final_prompt, '').strip()
-                                
-                                return {
-                                    'agent': self.name,
-                                    'response': generated_text,
-                                    'provider': f'Hugging Face ({working_model.split("/")[-1]})',
-                                    'success': True
-                                }
+            # Construction du payload
+            payload = {
+                "contents": [
+                    {"role": "user", "parts": [{"text": message}]}
+                ],
+                "config": {
+                    "systemInstruction": system_instruction,
+                    "maxOutputTokens": 250,
+                    "temperature": 0.7
+                }
+            }
+            
+            response = requests.post(url, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
                 
-                except Exception as e:
-                    logger.error(f"Erreur Hugging Face pour {self.name}: {e}")
-        
-        # 2. Aucune API disponible - réponse de fallback intelligente
+                if 'candidates' in result and result['candidates']:
+                    generated_text = result['candidates'][0]['content']['parts'][0]['text']
+                    
+                    return {
+                        'agent': self.name,
+                        'response': generated_text.strip(),
+                        'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
+                        'success': True
+                    }
+            
+            # Si l'API renvoie une erreur (quota, clé invalide, etc.)
+            error_msg = response.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response.status_code}')
+            logger.error(f"Erreur Gemini pour {self.name}: {error_msg}")
+            
+            return self._fallback_response(error_msg=error_msg)
+            
+        except Exception as e:
+            logger.error(f"Erreur non gérée lors de l'appel Gemini: {e}")
+            return self._fallback_response(error_msg=str(e))
+
+    def _fallback_response(self, error_msg=None):
+        """Réponse de fallback lorsque l'API Gemini n'est pas disponible ou échoue"""
         fallback_responses = {
-            'kai': "Je suis Kai, votre assistant IA. Pour que je puisse vous aider avec de vraies réponses intelligentes, veuillez configurer la clé API Hugging Face dans les paramètres. En attendant, je peux vous guider vers la configuration !",
-            'alex': "Je suis Alex, spécialiste de la productivité. J'ai besoin de mon API Hugging Face pour vous donner des conseils personnalisés. Rendez-vous dans les paramètres !",
-            'lina': "Je suis Lina, experte LinkedIn. J'ai besoin de mon API Hugging Face pour analyser votre situation. Configurez la clé API pour commencer !",
-            'marco': "Je suis Marco, spécialiste des réseaux sociaux. J'ai besoin de mon API Hugging Face pour générer des idées créatives. Direction les paramètres !",
-            'sofia': "Je suis Sofia, votre organisatrice personnelle. J'ai besoin de mon API Hugging Face pour optimiser votre planning. Allez dans les paramètres !"
+            'kai': "Je suis Kai, votre assistant IA. Pour que je puisse vous aider, veuillez configurer la clé API Gemini dans les paramètres.",
+            'alex': "Je suis Alex. Mon accès à l'IA est désactivé. Veuillez configurer l'API Gemini pour débloquer mes conseils de productivité.",
+            'lina': "Je suis Lina. Je ne peux pas analyser votre situation sans l'API Gemini. Configurez la clé pour commencer à travailler !",
+            'marco': "Je suis Marco. Je suis en mode démo. Configurer la clé Gemini me permettra de générer des idées créatives.",
+            'sofia': "Je suis Sofia. Mon planning est en attente. Veuillez configurer l'API Gemini pour optimiser votre organisation."
         }
+        
+        reason = "Clé API Gemini non configurée."
+        if error_msg:
+            reason = f"Erreur API: {error_msg}"
         
         return {
             'agent': self.name,
-            'response': fallback_responses.get(self.name.lower(), fallback_responses['kai']),
-            'provider': 'Mode Démo (Hugging Face non configuré)',
+            'response': f"{fallback_responses.get(self.name.lower(), fallback_responses['kai'])} ({reason})",
+            'provider': 'Mode Démo (Gemini non configuré)',
             'success': False
         }
 
@@ -434,23 +355,22 @@ def settings():
 
 @app.route('/api/save_key', methods=['POST'])
 def save_api_key():
-    """Sauvegarde la clé API Hugging Face uniquement"""
+    """Sauvegarde la clé API Gemini uniquement"""
     try:
         data = request.get_json()
         provider = data.get('provider')
         api_key = data.get('api_key')
         
-        if provider != 'huggingface':
-             return jsonify({'success': False, 'message': 'Seul le fournisseur "huggingface" est supporté dans cette version.'})
+        if provider != 'gemini':
+             return jsonify({'success': False, 'message': 'Seul le fournisseur "gemini" est supporté dans cette version.'})
 
         if not provider or not api_key:
             return jsonify({'success': False, 'message': 'Clé API requise'})
         
-        # La clé est sauvegardée dans la DB locale pour l'affichage/test
         success = api_manager.save_api_key(provider, api_key)
         
         if success:
-            return jsonify({'success': True, 'message': f'Clé {provider} sauvegardée. Veuillez cliquer sur "Tester les APIs" pour vérifier.'})
+            return jsonify({'success': True, 'message': f'Clé {provider} sauvegardée. Veuillez cliquer sur "Tester l\'API" pour vérifier.'})
         else:
             return jsonify({'success': False, 'message': 'Erreur lors de la sauvegarde'})
             
@@ -460,18 +380,23 @@ def save_api_key():
 
 @app.route('/api/test_apis', methods=['POST'])
 def test_apis():
-    """Test l'API Hugging Face configurée"""
+    """Test l'API Gemini configurée"""
     try:
-        # La fonction run_all_tests ne teste plus que HF
-        results = api_manager.run_all_tests()
+        success, message, _ = api_manager.test_gemini_api()
         
         return jsonify({
             'success': True,
-            'results': results,
+            'results': {
+                'gemini': {
+                    'success': success,
+                    'message': message,
+                    'tested_at': datetime.now().isoformat()
+                }
+            },
             'summary': {
-                'total': len(results),
-                'working': sum(1 for r in results.values() if r['success']),
-                'failed': sum(1 for r in results.values() if not r['success'])
+                'total': 1,
+                'working': 1 if success else 0,
+                'failed': 0 if success else 1
             }
         })
         
@@ -481,48 +406,16 @@ def test_apis():
 
 @app.route('/api/get_api_status', methods=['GET'])
 def get_api_status():
-    """Récupère le statut de l'API Hugging Face uniquement"""
+    """Récupère le statut de l'API Gemini uniquement"""
     try:
-        api_keys = api_manager.get_all_api_keys()
+        status_data = api_manager.get_api_status('gemini')
         
-        status = {}
-        provider = 'huggingface'
-        
-        # On vérifie si la clé est dans l'ENV
-        is_configured_in_env = api_manager.get_api_key(provider) is not None
-        
-        if provider in api_keys:
-            key_data = api_keys[provider]
-            status[provider] = {
-                'configured': True,
-                # On ne montre pas la clé complète pour des raisons de sécurité
-                'key_preview': key_data['key'][:8] + '...' if len(key_data['key']) > 8 else key_data['key'],
-                'status': key_data['status'],
-                'last_tested': key_data['last_tested'],
-                'working_model': key_data.get('working_model', '')
-            }
-        elif is_configured_in_env:
-             # Clé dans l'ENV, mais pas encore testée dans la DB
-            status[provider] = {
-                'configured': True,
-                'key_preview': 'Clé ENV masquée',
-                'status': 'untested',
-                'last_tested': None,
-                'working_model': ''
-            }
-        else:
-            status[provider] = {
-                'configured': False,
-                'key_preview': 'N/A',
-                'status': 'missing',
-                'last_tested': None,
-                'working_model': ''
-            }
-
         return jsonify({
             'success': True,
-            'apis': status,
-            'total_configured': 1 if is_configured_in_env or provider in api_keys else 0
+            'apis': {
+                'gemini': status_data
+            },
+            'total_configured': 1 if status_data['configured'] else 0
         })
         
     except Exception as e:
@@ -560,33 +453,6 @@ def chat():
             'success': False, 
             'message': f'Erreur lors du traitement: {str(e)}'
         })
-
-@app.route('/api/test_agent', methods=['POST'])
-def test_agent():
-    """Test spécifique d'un agent"""
-    try:
-        data = request.get_json()
-        agent_name = data.get('agent', 'kai').lower()
-        
-        if agent_name not in agents:
-            return jsonify({'success': False, 'message': f'Agent {agent_name} non trouvé'})
-        
-        test_message = "Bonjour, peux-tu te présenter et expliquer ton rôle ?"
-        agent = agents[agent_name]
-        response_data = agent.generate_response(test_message)
-        
-        return jsonify({
-            'success': True,
-            'agent': agent_name,
-            'test_message': test_message,
-            'response': response_data['response'],
-            'provider': response_data['provider'],
-            'api_working': response_data['success']
-        })
-        
-    except Exception as e:
-        logger.error(f"Erreur test agent: {e}")
-        return jsonify({'success': False, 'message': str(e)})
 
 if __name__ == '__main__':
     try:
