@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: GEMINI ONLY - Stabilité maximale
+Version: GEMINI ONLY - Stabilité maximale (JSON FIX)
 """
 
 import os
@@ -188,11 +188,12 @@ class APIManager:
             
             url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
             
+            # CORRECTION: Changement de 'config' à 'generationConfig' pour Gemini
             payload = {
                 "contents": [
                     {"role": "user", "parts": [{"text": test_prompt}]}
                 ],
-                "config": {
+                "generationConfig": { 
                     "maxOutputTokens": 10,
                     "temperature": 0.0
                 }
@@ -205,10 +206,13 @@ class APIManager:
                 
                 # Extraction de la réponse pour Gemini
                 if 'candidates' in result and result['candidates']:
-                    text = result['candidates'][0]['content']['parts'][0]['text'].strip().upper()
-                    if 'OK' in text:
-                        self.log_test_result('gemini', 'success')
-                        return True, "API Gemini fonctionnelle.", None
+                    # Utiliser .get pour éviter les erreurs de clé si la réponse est mal formée
+                    content = result['candidates'][0]['content']
+                    if 'parts' in content and content['parts']:
+                        text = content['parts'][0].get('text', '').strip().upper()
+                        if 'OK' in text or 'OK' == text:
+                            self.log_test_result('gemini', 'success')
+                            return True, "API Gemini fonctionnelle.", None
                 
                 # Échec du test malgré le statut 200
                 self.log_test_result('gemini', 'error')
@@ -247,6 +251,7 @@ class AIAgent:
             return self._fallback_response()
         
         # Contexte personnalisé pour l'agent (System Instruction)
+        # Note: L'instruction système est dans generationConfig pour une meilleure performance
         system_instruction = f"""Tu es {self.name}, {self.role}.
 Personnalité: {self.personality}
 Réponds de manière naturelle et personnalisée selon ton rôle.
@@ -256,11 +261,12 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
             url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
             
             # Construction du payload
+            # CORRECTION: Changement de 'config' à 'generationConfig' pour Gemini
             payload = {
                 "contents": [
                     {"role": "user", "parts": [{"text": message}]}
                 ],
-                "config": {
+                "generationConfig": {
                     "systemInstruction": system_instruction,
                     "maxOutputTokens": 250,
                     "temperature": 0.7
@@ -382,6 +388,7 @@ def save_api_key():
 def test_apis():
     """Test l'API Gemini configurée"""
     try:
+        # Note: on ne teste que Gemini dans cette version simplifiée
         success, message, _ = api_manager.test_gemini_api()
         
         return jsonify({
