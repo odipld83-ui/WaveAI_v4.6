@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: GEMINI ONLY - Stabilité maximale (JSON FIX)
+Version: GEMINI ONLY - Stabilité maximale et correction JSON finale
 """
 
 import os
@@ -188,7 +188,7 @@ class APIManager:
             
             url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
             
-            # CORRECTION: Changement de 'config' à 'generationConfig' pour Gemini
+            # Le test fonctionne avec cette structure generationConfig
             payload = {
                 "contents": [
                     {"role": "user", "parts": [{"text": test_prompt}]}
@@ -206,7 +206,6 @@ class APIManager:
                 
                 # Extraction de la réponse pour Gemini
                 if 'candidates' in result and result['candidates']:
-                    # Utiliser .get pour éviter les erreurs de clé si la réponse est mal formée
                     content = result['candidates'][0]['content']
                     if 'parts' in content and content['parts']:
                         text = content['parts'][0].get('text', '').strip().upper()
@@ -251,7 +250,7 @@ class AIAgent:
             return self._fallback_response()
         
         # Contexte personnalisé pour l'agent (System Instruction)
-        # Note: L'instruction système est dans generationConfig pour une meilleure performance
+        # CORRECTION FINALE : On utilise le rôle 'user' pour l'instruction système dans la conversation
         system_instruction = f"""Tu es {self.name}, {self.role}.
 Personnalité: {self.personality}
 Réponds de manière naturelle et personnalisée selon ton rôle.
@@ -261,13 +260,15 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
             url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
             
             # Construction du payload
-            # CORRECTION: Changement de 'config' à 'generationConfig' pour Gemini
+            # La system instruction est passée dans 'contents' pour la stabilité
             payload = {
                 "contents": [
+                    # 1. Le rôle et la personnalité sont passés en premier message utilisateur
+                    {"role": "user", "parts": [{"text": system_instruction}]},
+                    # 2. Le message de l'utilisateur est le deuxième message utilisateur
                     {"role": "user", "parts": [{"text": message}]}
                 ],
                 "generationConfig": {
-                    "systemInstruction": system_instruction,
                     "maxOutputTokens": 250,
                     "temperature": 0.7
                 }
@@ -388,7 +389,6 @@ def save_api_key():
 def test_apis():
     """Test l'API Gemini configurée"""
     try:
-        # Note: on ne teste que Gemini dans cette version simplifiée
         success, message, _ = api_manager.test_gemini_api()
         
         return jsonify({
