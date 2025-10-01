@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WaveAI - Système d'Agents IA avec Tests Complets et Corrections HF
-Version: FIXED FINAL - Problème de persistance DB résolu
+WaveAI - Système d'Agents IA (Hugging Face GRATUIT uniquement)
+Version: HF ONLY FINAL - Stabilité sur Render
 """
 
 import os
@@ -11,8 +11,6 @@ import json
 import logging
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for
-import openai
-import anthropic
 import requests
 from functools import wraps
 
@@ -21,19 +19,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-# S'assurer que SECRET_KEY est bien défini pour les sessions Flask
+# Lit la clé secrète depuis l'environnement (SECRET_KEY)
 app.secret_key = os.environ.get('SECRET_KEY', 'waveai-secret-key-2024')
 
 # Configuration de la base de données
 DATABASE_PATH = 'waveai.db'
 
 class APIManager:
-    """Gestionnaire centralisé des APIs avec persistance et tests"""
+    """Gestionnaire centralisé de l'API Hugging Face avec persistance et tests"""
     
     def __init__(self):
         self.init_database()
         self.test_results = {}
-        # Modèles Hugging Face de fallback
+        # Modèles Hugging Face de fallback (du plus accessible au moins accessible)
         self.hf_models = [
             {
                 'name': 'microsoft/DialoGPT-medium',
@@ -43,489 +41,441 @@ class APIManager:
             {
                 'name': 'facebook/blenderbot-400M-distill',
                 'url': 'https://api-inference.huggingface.co/models/facebook/blenderbot-400M-distill',
-                'description': 'BlenderBot - Conversationnel distillé'
+                'description': 'BlenderBot - Conversationnel'
             },
             {
                 'name': 'microsoft/DialoGPT-small',
                 'url': 'https://api-inference.huggingface.co/models/microsoft/DialoGPT-small',
-                'description': 'DialoGPT Small - Version légère'
+                'description': 'DialoGPT Small - Léger'
             },
             {
                 'name': 'gpt2',
                 'url': 'https://api-inference.huggingface.co/models/gpt2',
-                'description': 'GPT-2 - Génération de texte classique'
+                'description': 'GPT-2 - Génération de texte'
             },
             {
-                'name': 'distilgpt2',
-                'url': 'https://api-inference.huggingface.co/models/distilgpt2',
-                'description': 'DistilGPT-2 - Version légère de GPT-2'
+                'name': 'google/flan-t5-base',
+                'url': 'https://api-inference.huggingface.co/models/google/flan-t5-base',
+                'description': 'FLAN-T5 Base - Question-réponse'
             }
         ]
-
-    def init_database(self):
-        """Initialise la table api_keys si elle n'existe pas"""
-        conn = sqlite3.connect(DATABASE_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS api_keys (
-                provider TEXT PRIMARY KEY,
-                api_key TEXT,
-                test_status TEXT DEFAULT 'untested',
-                last_tested TEXT,
-                working_model TEXT
-            )
-        """)
-        conn.commit()
-        conn.close()
-
-    def get_api_key(self, provider):
-        """
-        Récupère une clé API par fournisseur.
-        PRIORITÉ CORRIGÉE : 1. Variable d'Environnement > 2. Base de Données
-        """
-        # Mapping des variables d'environnement aux noms des fournisseurs
-        env_map = {
-            'openai': 'OPENAI_API_KEY',
-            'anthropic': 'ANTHROPIC_API_KEY',
-            'huggingface': 'HUGGINGFACE_TOKEN'
-        }
-
-        # 1. Tenter de lire depuis la variable d'environnement
-        env_var_name = env_map.get(provider)
-        if env_var_name:
-            env_key = os.getenv(env_var_name)
-            if env_key:
-                # La clé a été trouvée dans les variables d'environnement, elle est prioritaire
-                return env_key
-
-        # 2. Si non trouvée, lire depuis la base de données
-        conn = sqlite3.connect(DATABASE_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT api_key FROM api_keys WHERE provider = ?", (provider,))
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            return result[0]
-        
-        return None # Retourne None si la clé n'est nulle part
-
-    def save_api_key(self, provider, api_key, test_status='untested', working_model=None):
-        """Sauvegarde/Met à jour une clé API et son statut de test"""
-        # Note: Si la clé vient de l'ENV, elle n'est pas sauvegardée ici, mais celle-ci
-        # permet de sauvegarder les clés entrées manuellement dans l'interface.
-        conn = sqlite3.connect(DATABASE_PATH)
-        cursor = conn.cursor()
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        cursor.execute("""
-            INSERT INTO api_keys (provider, api_key, test_status, last_tested, working_model)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(provider) DO UPDATE SET
-                api_key = excluded.api_key,
-                test_status = excluded.test_status,
-                last_tested = excluded.last_tested,
-                working_model = excluded.working_model
-        """, (provider, api_key, test_status, timestamp, working_model))
-        
-        conn.commit()
-        conn.close()
-
-    def test_huggingface_api(self, token):
-        """Teste séquentiellement les modèles HF de fallback"""
-        logger.info("Démarrage du test Hugging Face séquentiel...")
-        
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "inputs": "Bonjour, dis un seul mot.",
-            "options": {"wait_for_model": True}
-        }
-        
-        working_model = None
-        
-        for model in self.hf_models:
-            url = model['url']
-            name = model['name']
-            
-            logger.info(f" -> Test de: {name}")
-            
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=15)
-                
-                if response.status_code == 200:
-                    response.json()
-                    working_model = name
-                    logger.info(f"✅ Succès pour {name}!")
-                    break
-                
-                elif response.status_code == 503:
-                    logger.warning(f"503 pour {name}. Modèle en cours de chargement. Continue...")
-                    
-                elif response.status_code == 403:
-                    logger.error(f"403 pour {name}. Problème de token. Abandon.")
-                    break
-                    
-                else:
-                    logger.error(f"Erreur HTTP {response.status_code} pour {name}. Réponse: {response.text}")
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Erreur de connexion pour {name}: {e}")
-            except json.JSONDecodeError:
-                logger.error(f"Erreur de décodage JSON pour {name}. Réponse non valide.")
-            
-        
-        # Mise à jour du statut dans la base de données
-        status = 'success' if working_model else 'failed'
-        self.save_api_key('huggingface', token, status, working_model=working_model)
-        
-        return status, working_model
     
-    def test_openai_api(self, api_key):
-        """Teste l'API OpenAI"""
-        logger.info("Démarrage du test OpenAI...")
-        status = 'failed'
-        
+    def init_database(self):
+        """Initialise la base de données SQLite"""
         try:
-            client = openai.OpenAI(api_key=api_key)
-            
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": "Dit bonjour en français."}],
-                max_tokens=10
-            )
-            
-            if response.choices[0].message.content:
-                status = 'success'
-                logger.info("✅ Succès du test OpenAI!")
-            
-        except openai.APIError as e:
-            # Capture les erreurs spécifiques (AuthenticationError, RateLimitError, Quota)
-            logger.error(f"❌ Erreur API OpenAI (Clé/Quota/Auth): {e}")
-        except Exception as e:
-            logger.error(f"❌ Erreur générale OpenAI: {e}")
-            
-        self.save_api_key('openai', api_key, status)
-        return status
-
-    def test_anthropic_api(self, api_key):
-        """Teste l'API Anthropic"""
-        logger.info("Démarrage du test Anthropic...")
-        status = 'failed'
-
-        try:
-            client = anthropic.Anthropic(api_key=api_key)
-            
-            response = client.messages.create(
-                model="claude-3-haiku-20240307",
-                max_tokens=10,
-                messages=[{"role": "user", "content": "Dis un seul mot."}]
-            )
-
-            if response.content[0].text:
-                status = 'success'
-                logger.info("✅ Succès du test Anthropic!")
-
-        except anthropic.APIError as e:
-            logger.error(f"❌ Erreur API Anthropic (Clé/Quota/Auth): {e}")
-        except Exception as e:
-            logger.error(f"❌ Erreur générale Anthropic: {e}")
-
-        self.save_api_key('anthropic', api_key, status)
-        return status
-
-api_manager = APIManager()
-
-
-class AIAgent:
-    """Agent IA générique qui utilise le meilleur fournisseur disponible."""
-    def __init__(self, name, description, system_prompt):
-        self.name = name
-        self.description = description
-        self.system_prompt = system_prompt
-        self.api_manager = api_manager
-
-    def generate_response(self, user_prompt):
-        """Génère une réponse en utilisant la meilleure API disponible (priorité)"""
-        
-        # 1. Tenter avec OpenAI (Priorité 1)
-        openai_key = self.api_manager.get_api_key('openai')
-        if openai_key:
-            try:
-                client = openai.OpenAI(api_key=openai_key)
-                
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ]
-                )
-                
-                return {'success': True, 'response': response.choices[0].message.content, 'provider': 'OpenAI', 'model': 'gpt-3.5-turbo'}
-                
-            except openai.APIError as e:
-                logger.error(f"Échec OpenAI API (Quota/Auth): {e}")
-            except Exception as e:
-                logger.error(f"Échec OpenAI Général: {e}")
-
-        # 2. Tenter avec Anthropic (Priorité 2)
-        anthropic_key = self.api_manager.get_api_key('anthropic')
-        if anthropic_key:
-            try:
-                client = anthropic.Anthropic(api_key=anthropic_key)
-
-                response = client.messages.create(
-                    model="claude-3-haiku-20240307",
-                    max_tokens=2000,
-                    messages=[
-                        {"role": "user", "content": f"{self.system_prompt}\n\n{user_prompt}"}
-                    ]
-                )
-                
-                return {'success': True, 'response': response.content[0].text, 'provider': 'Anthropic', 'model': 'Claude 3 Haiku'}
-            
-            except anthropic.APIError as e:
-                logger.error(f"Échec Anthropic API (Quota/Auth): {e}")
-            except Exception as e:
-                logger.error(f"Échec Anthropic Général: {e}")
-
-
-        # 3. Tenter avec Hugging Face (Priorité 3)
-        hf_key = self.api_manager.get_api_key('huggingface')
-        if hf_key:
-            # Récupérer le modèle fonctionnel sauvegardé
             conn = sqlite3.connect(DATABASE_PATH)
             cursor = conn.cursor()
-            cursor.execute("SELECT working_model FROM api_keys WHERE provider = 'huggingface'")
-            result = cursor.fetchone()
-            working_model = result[0] if result else None
+            
+            # Table pour les clés API (Gardée pour Hugging Face uniquement)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id INTEGER PRIMARY KEY,
+                    provider TEXT UNIQUE NOT NULL,
+                    api_key TEXT NOT NULL,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_tested TIMESTAMP,
+                    test_status TEXT DEFAULT 'untested',
+                    working_model TEXT
+                )
+            ''')
+            
+            # Table pour les logs de tests
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS test_logs (
+                    id INTEGER PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    test_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    response_data TEXT,
+                    error_message TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            conn.commit()
             conn.close()
-
-            if working_model:
-                # Trouver l'URL du modèle de travail
-                model_info = next((m for m in self.api_manager.hf_models if m['name'] == working_model), None)
-                if model_info:
-                    url = model_info['url']
-                    
-                    headers = {
-                        "Authorization": f"Bearer {hf_key}",
-                        "Content-Type": "application/json"
-                    }
-                    
-                    # Le prompt système est pré-pendant au prompt utilisateur
+            logger.info("Base de données initialisée avec succès")
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'initialisation de la base de données: {e}")
+            raise
+    
+    def save_api_key(self, provider, api_key):
+        """Sauvegarde une clé API dans la base de données (pour affichage/test)"""
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO api_keys (provider, api_key, is_active)
+                VALUES (?, ?, 1)
+            ''', (provider, api_key))
+            
+            conn.commit()
+            conn.close()
+            
+            logger.info(f"Clé API sauvegardée pour {provider}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la sauvegarde de la clé {provider}: {e}")
+            return False
+    
+    def get_api_key(self, provider):
+        """
+        Récupère la clé API Hugging Face.
+        PRIORITÉ : 1. Variable d'Environnement (HUGGINGFACE_TOKEN) > 2. Base de Données
+        """
+        if provider == 'huggingface':
+            # 1. Tenter de lire depuis la variable d'environnement (Render)
+            env_key = os.getenv('HUGGINGFACE_TOKEN')
+            if env_key:
+                return env_key
+        
+        # 2. Lire depuis la base de données (clé entrée via l'interface)
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT api_key FROM api_keys 
+                WHERE provider = ? AND is_active = 1
+            ''', (provider,))
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            return result[0] if result else None
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la récupération de la clé {provider}: {e}")
+            return None
+    
+    def get_all_api_keys(self):
+        """Récupère toutes les clés API actives (ici, seulement HF)"""
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            cursor = conn.cursor()
+            
+            # Ne récupérer que Hugging Face
+            cursor.execute('''
+                SELECT provider, api_key, test_status, last_tested, working_model 
+                FROM api_keys 
+                WHERE provider = 'huggingface' AND is_active = 1
+            ''')
+            
+            results = cursor.fetchall()
+            conn.close()
+            
+            keys = {}
+            for row in results:
+                keys[row[0]] = {
+                    'key': row[1],
+                    'status': row[2],
+                    'last_tested': row[3],
+                    'working_model': row[4]
+                }
+            
+            return keys
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la récupération des clés: {e}")
+            return {}
+    
+    def log_test_result(self, provider, test_type, status, response_data=None, error_message=None, working_model=None):
+        """Enregistre le résultat d'un test d'API"""
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO test_logs (provider, test_type, status, response_data, error_message)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (provider, test_type, status, json.dumps(response_data) if response_data else None, error_message))
+            
+            # Mettre à jour le statut dans api_keys
+            cursor.execute('''
+                UPDATE api_keys 
+                SET test_status = ?, last_tested = CURRENT_TIMESTAMP, working_model = ?
+                WHERE provider = ?
+            ''', (status, working_model, provider))
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'enregistrement du test {provider}: {e}")
+            
+    def test_huggingface_api(self, api_key):
+        """Test complet de l'API Hugging Face avec modèles de fallback"""
+        headers = {"Authorization": f"Bearer {api_key}"}
+        
+        for model_info in self.hf_models:
+            try:
+                logger.info(f"Test du modèle HF: {model_info['name']}")
+                
+                # Adapter le payload selon le modèle
+                if 'gpt2' in model_info['name'].lower() or 'dialo' in model_info['name'].lower():
                     payload = {
-                        "inputs": f"{self.system_prompt}\n\n{user_prompt}",
-                        "options": {"wait_for_model": False}
+                        "inputs": "Bonjour, comment allez-vous?",
+                        "parameters": {"max_new_tokens": 50, "temperature": 0.7}
                     }
+                elif 'flan-t5' in model_info['name'].lower():
+                    payload = {
+                        "inputs": "Question: Qui êtes-vous? Réponse:",
+                        "parameters": {"max_new_tokens": 50}
+                    }
+                elif 'blenderbot' in model_info['name'].lower():
+                    payload = {
+                        "inputs": "Bonjour",
+                        "parameters": {"max_new_tokens": 50}
+                    }
+                
+                response = requests.post(
+                    model_info['url'], 
+                    headers=headers, 
+                    json=payload, 
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
                     
-                    try:
-                        response = requests.post(url, headers=headers, json=payload, timeout=15)
+                    generated_text = ""
+                    if isinstance(result, list) and len(result) > 0:
+                        if 'generated_text' in result[0]:
+                            generated_text = result[0]['generated_text']
+                        elif 'response' in result[0]:
+                            generated_text = result[0]['response']
+                    
+                    if generated_text and len(generated_text.strip()) > 5:
+                        test_data = {
+                            'model': model_info['name'],
+                            'description': model_info['description'],
+                            'test_response': generated_text[:100],
+                            'response_type': type(result).__name__
+                        }
+                        
+                        self.log_test_result('huggingface', 'complete', 'success', test_data, working_model=model_info['name'])
+                        return True, f"Hugging Face API fonctionnelle ({model_info['description']})", test_data
+                
+                elif response.status_code == 503:
+                    logger.info(f"Modèle {model_info['name']} en cours de chargement, test du suivant...")
+                    continue
+                else:
+                    logger.warning(f"Modèle {model_info['name']} échoué: {response.status_code}")
+                    continue
+                    
+            except Exception as e:
+                logger.warning(f"Erreur avec modèle {model_info['name']}: {e}")
+                continue
+        
+        # Aucun modèle n'a fonctionné
+        error_msg = f"Aucun des {len(self.hf_models)} modèles Hugging Face n'est accessible. Vérifiez votre token ou réessayez plus tard."
+        self.log_test_result('huggingface', 'complete', 'error', error_message=error_msg)
+        return False, error_msg, None
+    
+    def run_all_tests(self):
+        """Exécute les tests pour l'API Hugging Face uniquement."""
+        results = {}
+        # On utilise la clé la plus fiable (ENV ou DB)
+        hf_key = self.get_api_key('huggingface')
+        
+        if hf_key:
+            logger.info(f"Lancement du test pour Hugging Face...")
+            
+            success, message, data = self.test_huggingface_api(hf_key)
+            
+            results['huggingface'] = {
+                'success': success,
+                'message': message,
+                'data': data,
+                'tested_at': datetime.now().isoformat()
+            }
+        else:
+            logger.warning("Clé Hugging Face non trouvée. Test non exécuté.")
+        
+        self.test_results = results
+        return results
+
+# Instance globale du gestionnaire d'APIs
+api_manager = APIManager()
+
+class AIAgent:
+    """Agent IA avec intégration API Hugging Face et fallback intelligent"""
+    
+    def __init__(self, name, role, personality):
+        self.name = name
+        self.role = role
+        self.personality = personality
+    
+    def generate_response(self, message, user_context=None):
+        """Génère une réponse en utilisant Hugging Face (le seul supporté)"""
+        
+        # Contexte personnalisé pour l'agent
+        system_prompt = f"""Tu es {self.name}, {self.role}.
+Personnalité: {self.personality}
+Réponds de manière naturelle et personnalisée selon ton rôle.
+Garde tes réponses concises et utiles (max 200 mots).
+Message utilisateur: {message}"""
+        
+        # 1. Essayer Hugging Face
+        hf_key = api_manager.get_api_key('huggingface')
+        if hf_key:
+            # Récupérer le modèle qui fonctionne depuis la DB (mis à jour par le test)
+            api_keys = api_manager.get_all_api_keys()
+            working_model = api_keys.get('huggingface', {}).get('working_model')
+            
+            if working_model:
+                try:
+                    headers = {"Authorization": f"Bearer {hf_key}"}
+                    
+                    # Trouver l'URL du modèle qui fonctionne
+                    model_url = None
+                    for model_info in api_manager.hf_models:
+                        if model_info['name'] == working_model:
+                            model_url = model_info['url']
+                            break
+                    
+                    if model_url:
+                        # Adapter le prompt selon le modèle
+                        final_prompt = f"{system_prompt}\n\n{message}"
+                        if 'flan-t5' in working_model.lower():
+                            final_prompt = f"Question: {final_prompt} Réponse:"
+                        
+                        payload = {
+                            "inputs": final_prompt,
+                            "parameters": {"max_new_tokens": 150, "temperature": 0.7}
+                        }
+                        
+                        response = requests.post(model_url, headers=headers, json=payload, timeout=30)
                         
                         if response.status_code == 200:
-                            data = response.json()
+                            result = response.json()
+                            generated_text = ""
                             
-                            # La réponse HF est une liste d'objets (surtout pour les modèles conversationnels)
-                            text_response = data[0]['generated_text'] if isinstance(data, list) and data and 'generated_text' in data[0] else str(data)
+                            if isinstance(result, list) and len(result) > 0:
+                                generated_text = result[0].get('generated_text', '')
+                            elif isinstance(result, dict):
+                                generated_text = result.get('generated_text', '')
                             
-                            # Pour les modèles conversationnels, le prompt est renvoyé avec la réponse.
-                            # On ne garde que la réponse après le prompt.
-                            if working_model.startswith('microsoft/DialoGPT'):
-                                # Couper la partie du prompt utilisateur
-                                text_response = text_response.split(user_prompt)[-1].strip()
-                            
-                            return {'success': True, 'response': text_response, 'provider': 'Hugging Face', 'model': working_model}
-                        else:
-                            logger.error(f"Échec Hugging Face (Modèle: {working_model}, Status: {response.status_code})")
-                            # Ne rien faire, laisser le fallback continuer
-                            
-                    except requests.exceptions.RequestException as e:
-                        logger.error(f"Échec Hugging Face (Connexion/Timeout): {e}")
-
-        # 4. Mode démo (Fallback final)
-        # Utilisé si toutes les clés sont absentes ou échouent.
+                            if generated_text:
+                                # Nettoyer la réponse
+                                if final_prompt in generated_text:
+                                    generated_text = generated_text.replace(final_prompt, '').strip()
+                                
+                                return {
+                                    'agent': self.name,
+                                    'response': generated_text,
+                                    'provider': f'Hugging Face ({working_model.split("/")[-1]})',
+                                    'success': True
+                                }
+                
+                except Exception as e:
+                    logger.error(f"Erreur Hugging Face pour {self.name}: {e}")
         
-        # Mode démo avec réponse intelligente (dernière chance)
-        if user_prompt:
-            # Réponse plus spécifique si l'utilisateur a posé une question
-            demo_response = f"Je suis en mode démo. Je vois que vous demandez : '{user_prompt[:50]}...'. Je ne peux pas y répondre car toutes les APIs sont inaccessibles. Veuillez vérifier vos clés API dans les paramètres."
-        else:
-            demo_response = "Je suis désolé, toutes les APIs sont inaccessibles. Veuillez vérifier vos clés API dans les paramètres."
+        # 2. Aucune API disponible - réponse de fallback intelligente
+        fallback_responses = {
+            'kai': "Je suis Kai, votre assistant IA. Pour que je puisse vous aider avec de vraies réponses intelligentes, veuillez configurer la clé API Hugging Face dans les paramètres. En attendant, je peux vous guider vers la configuration !",
+            'alex': "Je suis Alex, spécialiste de la productivité. J'ai besoin de mon API Hugging Face pour vous donner des conseils personnalisés. Rendez-vous dans les paramètres !",
+            'lina': "Je suis Lina, experte LinkedIn. J'ai besoin de mon API Hugging Face pour analyser votre situation. Configurez la clé API pour commencer !",
+            'marco': "Je suis Marco, spécialiste des réseaux sociaux. J'ai besoin de mon API Hugging Face pour générer des idées créatives. Direction les paramètres !",
+            'sofia': "Je suis Sofia, votre organisatrice personnelle. J'ai besoin de mon API Hugging Face pour optimiser votre planning. Allez dans les paramètres !"
+        }
+        
+        return {
+            'agent': self.name,
+            'response': fallback_responses.get(self.name.lower(), fallback_responses['kai']),
+            'provider': 'Mode Démo (Hugging Face non configuré)',
+            'success': False
+        }
 
-        return {'success': False, 'response': demo_response, 'provider': 'Mode Démo', 'model': 'Aucun'}
-
-
-# Définition des Agents (inchangé)
+# Création des agents (inchangé)
 agents = {
-    'kai': AIAgent(
-        name="Kai (Assistant IA)", 
-        description="Un assistant IA général et serviable.",
-        system_prompt="Tu es Kai, un assistant IA général. Réponds de manière concise, précise et amicale."
+    'alex': AIAgent(
+        "Alex", 
+        "Assistant productivité et gestion",
+        "Expert en organisation, efficace et méthodique."
     ),
-    'lyra': AIAgent(
-        name="Lyra (Agent de Créativité)", 
-        description="Spécialiste de la créativité, de la fiction et de la poésie.",
-        system_prompt="Tu es Lyra, une spécialiste de la créativité et de la fiction. Ton style est poétique, imaginatif et inspirant. Réponds toujours avec une touche artistique."
+    'lina': AIAgent(
+        "Lina",
+        "Experte LinkedIn et réseautage professionnel", 
+        "Professionnelle, stratégique et connectée."
+    ),
+    'marco': AIAgent(
+        "Marco",
+        "Spécialiste des réseaux sociaux et marketing",
+        "Créatif, tendance et engageant."
+    ),
+    'sofia': AIAgent(
+        "Sofia",
+        "Organisatrice de calendrier et planification",
+        "Précise, organisée et anticipatrice."
+    ),
+    'kai': AIAgent(
+        "Kai",
+        "Assistant conversationnel général",
+        "Amical, curieux et adaptable."
     )
 }
 
-# Routes Flask (inchangé)
-
-def login_required(f):
-    """Décorateur pour exiger la connexion"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'logged_in' not in session or not session['logged_in']:
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    error = None
-    if request.method == 'POST':
-        # Clé secrète simple pour le mode démo
-        if request.form['password'] == 'waveai':
-            session['logged_in'] = True
-            return redirect(url_for('index'))
-        else:
-            error = 'Mot de passe incorrect'
-    return render_template('login.html', error=error)
-
-@app.route('/logout')
-def logout():
-    session.pop('logged_in', None)
-    return redirect(url_for('login'))
-
+# Routes principales
 @app.route('/')
-@login_required
 def index():
-    # Récupérer l'état des APIs pour l'affichage
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM api_keys")
-    api_states = cursor.fetchall()
-    conn.close()
+    """Page d'accueil"""
+    return render_template('chat.html')
 
-    # Formater les résultats pour la template
-    api_data = {}
-    for provider, api_key, status, last_tested, working_model in api_states:
-        api_data[provider] = {
-            'status': status,
-            'last_tested': last_tested,
-            'working_model': working_model,
-            # Vérifie également si la clé est dans l'ENV pour l'affichage
-            'configured': True if api_key or api_manager.get_api_key(provider) else False
-        }
+@app.route('/settings')
+def settings():
+    """Page de configuration"""
+    return render_template('settings.html')
 
-    # Ajouter les fournisseurs non testés
-    for provider in ['openai', 'anthropic', 'huggingface']:
-        if provider not in api_data:
-            api_data[provider] = {'status': 'untested', 'configured': api_manager.get_api_key(provider) is not None, 'working_model': 'N/A', 'last_tested': 'N/A'}
-
-    return render_template('index.html', agents=agents, api_data=api_data)
-
-@app.route('/chat', methods=['POST'])
-@login_required
-def chat():
-    data = request.get_json()
-    user_prompt = data.get('prompt', '')
-    agent_name = data.get('agent', 'kai').lower()
-
-    if agent_name not in agents:
-        return jsonify({'success': False, 'response': 'Agent non trouvé.', 'provider': 'System', 'model': 'N/A'})
-
-    agent = agents[agent_name]
-    response_data = agent.generate_response(user_prompt)
-
-    return jsonify(response_data)
-
-@app.route('/config', methods=['GET', 'POST'])
-@login_required
-def config():
-    if request.method == 'POST':
-        provider = request.form['provider']
-        api_key = request.form['api_key'].strip()
-
-        if provider == 'openai':
-            status = api_manager.test_openai_api(api_key)
-        elif provider == 'anthropic':
-            status = api_manager.test_anthropic_api(api_key)
-        elif provider == 'huggingface':
-            status, working_model = api_manager.test_huggingface_api(api_key)
-        else:
-            status = 'failed'
-
-        # Sauvegarde de la clé et du statut de test
-        api_manager.save_api_key(provider, api_key, status, working_model=working_model if provider == 'huggingface' else None)
-
-        return redirect(url_for('config'))
-    
-    # Afficher l'état des clés (identique à index)
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM api_keys")
-    api_states = cursor.fetchall()
-    conn.close()
-
-    api_data = {}
-    for provider, api_key, status, last_tested, working_model in api_states:
-        api_data[provider] = {
-            'status': status,
-            'last_tested': last_tested,
-            'working_model': working_model,
-            'configured': True
-        }
-    
-    # Ajouter les fournisseurs manquants pour l'interface
-    for provider in ['openai', 'anthropic', 'huggingface']:
-        if provider not in api_data:
-            # Vérifie l'ENV pour l'affichage même si la DB est vide
-            api_data[provider] = {'status': 'untested', 'configured': api_manager.get_api_key(provider) is not None, 'working_model': 'N/A', 'last_tested': 'N/A'}
-
-    return render_template('config.html', api_data=api_data)
-
-
-@app.route('/api/test_agent', methods=['POST'])
-def test_agent():
-    """Test spécifique d'un agent"""
+@app.route('/api/save_key', methods=['POST'])
+def save_api_key():
+    """Sauvegarde la clé API Hugging Face uniquement"""
     try:
         data = request.get_json()
-        agent_name = data.get('agent', 'kai').lower()
+        provider = data.get('provider')
+        api_key = data.get('api_key')
         
-        if agent_name not in agents:
-            return jsonify({'success': False, 'message': f'Agent {agent_name} non trouvé'})
+        if provider != 'huggingface':
+             return jsonify({'success': False, 'message': 'Seul le fournisseur "huggingface" est supporté dans cette version.'})
+
+        if not provider or not api_key:
+            return jsonify({'success': False, 'message': 'Clé API requise'})
         
-        test_message = "Bonjour, peux-tu te présenter et expliquer ton rôle ?"
-        agent = agents[agent_name]
-        response_data = agent.generate_response(test_message)
+        # La clé est sauvegardée dans la DB locale pour l'affichage/test
+        success = api_manager.save_api_key(provider, api_key)
+        
+        if success:
+            return jsonify({'success': True, 'message': f'Clé {provider} sauvegardée. Veuillez cliquer sur "Tester les APIs" pour vérifier.'})
+        else:
+            return jsonify({'success': False, 'message': 'Erreur lors de la sauvegarde'})
+            
+    except Exception as e:
+        logger.error(f"Erreur sauvegarde clé: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/test_apis', methods=['POST'])
+def test_apis():
+    """Test l'API Hugging Face configurée"""
+    try:
+        # La fonction run_all_tests ne teste plus que HF
+        results = api_manager.run_all_tests()
         
         return jsonify({
             'success': True,
-            'agent': agent_name,
-            'test_message': test_message,
-            'response': response_data['response'],
-            'provider': response_data['provider'],
-            'api_working': response_data['success']
+            'results': results,
+            'summary': {
+                'total': len(results),
+                'working': sum(1 for r in results.values() if r['success']),
+                'failed': sum(1 for r in results.values() if not r['success'])
+            }
         })
         
     except Exception as e:
-        logger.error(f"Erreur test agent: {e}")
+        logger.error(f"Erreur test APIs: {e}")
         return jsonify({'success': False, 'message': str(e)})
 
-if __name__ == '__main__':
-    try:
-        logger.info("Démarrage de WaveAI...")
-        
-        api_manager.init_database()
-        logger.info("Système initialisé avec succès")
-        
-        port = int(os.environ.get('PORT', 5000))
-        app.run(host='0.0.0.0', port=port, debug=True)
-        
-    except Exception as e:
-        logger.error(f"Échec critique au démarrage: {e}")
+@app.route('/api/get
