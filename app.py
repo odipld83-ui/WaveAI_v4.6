@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: GEMINI ONLY - STABILITÉ ULTIME ET CORRECTION MAX_TOKENS
+Version: GEMINI FINAL avec FUNCTION CALLING
 """
 
 import os
@@ -12,6 +12,16 @@ from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 import requests
 
+# **[1. NOUVEL IMPORT CRITIQUE]** : Importe les outils depuis tools.py
+try:
+    from tools import AVAILABLE_TOOLS, get_tool_specs
+    TOOLS_AVAILABLE = True
+except ImportError as e:
+    # Fallback si tools.py n'est pas trouvé ou si get_tool_specs manque
+    logging.error(f"Erreur d'importation des outils : {e}. Les agents ne pourront pas utiliser de fonctions.")
+    AVAILABLE_TOOLS = {}
+    TOOLS_AVAILABLE = False
+    
 # -- DATABASE IMPORTS AND CONFIGURATION (POSTGRESQL VERSION) --
 import psycopg2
 from urllib.parse import urlparse
@@ -20,7 +30,7 @@ from urllib.parse import urlparse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+app = Flask(__file__)
 app.secret_key = os.environ.get('SECRET_KEY', 'waveai-secret-key-2024')
 
 # Configuration de la base de données (PostgreSQL)
@@ -275,7 +285,7 @@ class AIAgent:
         self.personality = personality
     
     def generate_response(self, message):
-        """Génère une réponse en utilisant Gemini (Version sécurisée avec correction MAX_TOKENS)"""
+        """Génère une réponse en utilisant Gemini, supportant le Function Calling."""
         
         api_key = api_manager.get_api_key('gemini')
         if not api_key:
@@ -284,35 +294,102 @@ class AIAgent:
         system_instruction = f"""Tu es {self.name}, {self.role}.
 Personnalité: {self.personality}
 Réponds de manière naturelle et personnalisée selon ton rôle.
-Garde tes réponses concises et utiles (maximum 150 mots)."""
+Garde tes réponses concises et utiles (maximum 150 mots).
+Utilise les fonctions disponibles si elles sont pertinentes pour répondre à la demande de l'utilisateur."""
+
+        # Historique de la conversation pour le Function Calling
+        conversation_history = [
+            {"role": "user", "parts": [{"text": system_instruction}]},
+            {"role": "user", "parts": [{"text": message}]}
+        ]
         
         try:
             url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
             
+            # **[2. PRÉPARATION DU PAYLOAD INITIAL]** : Ajout des outils disponibles
             payload = {
-                "contents": [
-                    {"role": "user", "parts": [{"text": system_instruction}]},
-                    {"role": "user", "parts": [{"text": message}]}
-                ],
+                "contents": conversation_history,
+                "config": {
+                    "tools": [{"functionDeclarations": get_tool_specs()}] if TOOLS_AVAILABLE else [],
+                },
                 "generationConfig": {
-                    "maxOutputTokens": 1000,  # **CORRECTION**: Augmenté pour éviter l'erreur MAX_TOKENS
+                    "maxOutputTokens": 1000,
                     "temperature": 0.7
                 }
             }
             
+            # --- Étape 1 : Appel initial pour voir si un outil est nécessaire ---
             response = requests.post(url, json=payload, timeout=30)
             
-            if response.status_code == 200:
-                result = response.json()
+            if response.status_code != 200:
+                error_msg = response.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response.status_code}')
+                logger.error(f"Erreur Gemini (HTTP {response.status_code}) pour {self.name}: {error_msg}")
+                return self._fallback_response(error_msg=error_msg)
+
+            result = response.json()
+            candidate = result['candidates'][0] if 'candidates' in result and result['candidates'] else None
+            
+            # --- Vérification de l'appel de fonction ---
+            if candidate and 'functionCall' in candidate:
+                function_call = candidate['functionCall']
+                function_name = function_call['name']
+                args = dict(function_call['args'])
                 
-                generated_text = None
+                logger.info(f"Agent {self.name} demande d'appeler la fonction: {function_name} avec args: {args}")
                 
-                if 'candidates' in result and result['candidates']:
-                    candidate = result['candidates'][0]
-                    # La présence de 'parts' est la preuve que la réponse est complète
-                    if 'content' in candidate and 'parts' in candidate['content'] and candidate['content']['parts']:
-                        generated_text = candidate['content']['parts'][0].get('text')
-                
+                if function_name in AVAILABLE_TOOLS:
+                    # **[3. EXÉCUTION DE L'OUTIL]**
+                    tool_function = AVAILABLE_TOOLS[function_name]
+                    
+                    try:
+                        function_result = tool_function(**args)
+                        logger.info(f"Résultat de la fonction {function_name}: {function_result}")
+                        
+                        # --- Étape 2 : Préparation du second appel avec le résultat de l'outil ---
+                        conversation_history.append({
+                            "role": "model",
+                            "parts": [{"functionCall": function_call}]
+                        })
+                        conversation_history.append({
+                            "role": "function",
+                            "parts": [{"functionResponse": {"name": function_name, "response": {"result": function_result}}}]
+                        })
+                        
+                        payload["contents"] = conversation_history
+                        
+                        # --- Étape 3 : Second appel à Gemini pour générer la réponse finale ---
+                        response = requests.post(url, json=payload, timeout=30)
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            candidate = result['candidates'][0] if 'candidates' in result and result['candidates'] else None
+                            
+                            # Récupération de la réponse finale
+                            if candidate and 'content' in candidate and 'parts' in candidate['content'] and candidate['content']['parts']:
+                                generated_text = candidate['content']['parts'][0].get('text')
+                                if generated_text:
+                                    return {
+                                        'agent': self.name,
+                                        'response': generated_text.strip(),
+                                        'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
+                                        'success': True
+                                    }
+
+                        # Si l'API échoue ou ne donne pas de réponse finale au 2ème appel
+                        logger.error(f"Échec de la réponse finale après appel de l'outil {function_name}.")
+                        return self._fallback_response(error_msg=f"Échec de l'obtention de la réponse finale après l'exécution de l'outil {function_name}.")
+                        
+                    except Exception as tool_e:
+                        logger.error(f"Erreur lors de l'exécution de l'outil {function_name}: {tool_e}")
+                        return self._fallback_response(error_msg=f"Erreur interne de l'outil {function_name}: {str(tool_e)}")
+
+                else:
+                    logger.error(f"Fonction {function_name} demandée par Gemini n'est pas dans AVAILABLE_TOOLS.")
+                    return self._fallback_response(error_msg=f"L'outil {function_name} est introuvable.")
+
+            # --- Cas par défaut : Réponse texte directe (quand l'outil n'est pas nécessaire) ---
+            if candidate and 'content' in candidate and 'parts' in candidate['content'] and candidate['content']['parts']:
+                generated_text = candidate['content']['parts'][0].get('text')
                 if generated_text:
                     return {
                         'agent': self.name,
@@ -320,28 +397,22 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
                         'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
                         'success': True
                     }
-                
-                # Journalisation détaillée du blocage/échec pour diagnostic
-                error_msg = "Réponse Gemini bloquée ou vide. Réessayez avec une autre formulation."
-                
-                # Enregistre le JSON complet pour diagnostic
-                logger.error(f"Réponse Gemini Bloquée (JSON complet): {json.dumps(result)}")
 
-                if 'promptFeedback' in result and 'blockReason' in result['promptFeedback']:
-                    block_reason = result['promptFeedback']['blockReason']
-                    error_msg += f" (Raison: {block_reason})"
-                
-                logger.error(f"Erreur Gemini pour {self.name} (Réponse vide/bloquée) : {error_msg}")
-                return self._fallback_response(error_msg=error_msg)
+            # --- GESTION DES BLOCAGES ET ERREURS INATTENDUES ---
+            error_msg = "Réponse Gemini bloquée ou vide. Réessayez avec une autre formulation."
+            logger.error(f"Réponse Gemini Bloquée (JSON complet): {json.dumps(result)}")
+
+            if 'promptFeedback' in result and 'blockReason' in result['promptFeedback']:
+                block_reason = result['promptFeedback']['blockReason']
+                error_msg += f" (Raison: {block_reason})"
             
-            error_msg = response.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response.status_code}')
-            logger.error(f"Erreur Gemini pour {self.name}: {error_msg}")
-            
+            logger.error(f"Erreur Gemini pour {self.name} (Réponse vide/bloquée) : {error_msg}")
             return self._fallback_response(error_msg=error_msg)
             
         except Exception as e:
             logger.error(f"Erreur non gérée lors de l'appel Gemini: {e}")
             return self._fallback_response(error_msg=str(e))
+
 
     def _fallback_response(self, error_msg=None):
         """Réponse de fallback lorsque l'API Gemini n'est pas disponible ou échoue"""
@@ -506,7 +577,7 @@ def chat():
             'message': f'Erreur lors du traitement: {str(e)}'
         })
 
-if __name__ == '__main__':
+if __file__ == '__main__':
     try:
         logger.info("Démarrage de WaveAI...")
         api_manager.init_database()
