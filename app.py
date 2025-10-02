@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: GEMINI ONLY - Stabilité maximale et correction JSON finale
+Version: GEMINI ONLY - Stabilité maximale et corrections finales PostgreSQL
 """
 
 import os
@@ -63,7 +63,7 @@ class APIManager:
     def init_database(self):
         """
         Initialise la base de données PostgreSQL (tables) et effectue la migration.
-        CORRECTION: Ajout de la logique ALTER TABLE pour la colonne 'created_at'.
+        CECI EST LA VRAIE FIX: Assure que la colonne manquante est ajoutée.
         """
         if not DATABASE_URL:
             logger.error("Initialisation DB échouée: DATABASE_URL non défini.")
@@ -120,15 +120,20 @@ class APIManager:
             raise 
     
     def save_api_key(self, provider, api_key):
-        """Sauvegarde la clé API Gemini (utilise ON CONFLICT pour PostgreSQL)"""
+        """
+        Sauvegarde la clé API Gemini. 
+        Requête simplifiée pour éviter le conflit "created_at" dans l'INSERT.
+        """
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
+                # REQUISE : La migration dans init_database doit avoir ajouté la colonne !
+                # On retire 'created_at' de la clause INSERT car la valeur par défaut est gérée par la DB
                 cursor.execute(
                     """
-                    INSERT INTO api_keys (provider, api_key, is_active, created_at)
-                    VALUES (%s, %s, TRUE, CURRENT_TIMESTAMP)
+                    INSERT INTO api_keys (provider, api_key, is_active)
+                    VALUES (%s, %s, TRUE)
                     ON CONFLICT (provider) DO UPDATE
                     SET api_key = EXCLUDED.api_key, 
                         is_active = EXCLUDED.is_active;
@@ -210,6 +215,7 @@ class APIManager:
             }
             
         except Exception as e:
+            # Cette erreur était 'column "created_at" does not exist' avant la correction de migration
             logger.error(f"Erreur statut APIs: {e}")
             return {
                 'configured': False,
@@ -297,9 +303,38 @@ class APIManager:
 # Instance globale du gestionnaire d'APIs
 api_manager = APIManager()
 
+# Création des agents (inchangé)
+# ... (Gardez la définition des agents telle quelle)
+agents = {
+    'alex': AIAgent(
+        "Alex", 
+        "Assistant productivité et gestion",
+        "Expert en organisation, efficace et méthodique."
+    ),
+    'lina': AIAgent(
+        "Lina",
+        "Experte LinkedIn et réseautage professionnel", 
+        "Professionnelle, stratégique et connectée."
+    ),
+    'marco': AIAgent(
+        "Marco",
+        "Spécialiste des réseaux sociaux et marketing",
+        "Créatif, tendance et engageant."
+    ),
+    'sofia': AIAgent(
+        "Sofia",
+        "Organisatrice de calendrier et planification",
+        "Précise, organisée et anticipatrice."
+    ),
+    'kai': AIAgent(
+        "Kai",
+        "Assistant conversationnel général",
+        "Amical, curieux et adaptable."
+    )
+}
+
 class AIAgent:
-    """Agent IA utilisant l'API Gemini"""
-    
+    # ... (Définition de la classe AIAgent inchangée, pour la concision)
     def __init__(self, name, role, personality):
         self.name = name
         self.role = role
@@ -381,41 +416,11 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
             'success': False
         }
 
-# Création des agents (inchangé)
-agents = {
-    'alex': AIAgent(
-        "Alex", 
-        "Assistant productivité et gestion",
-        "Expert en organisation, efficace et méthodique."
-    ),
-    'lina': AIAgent(
-        "Lina",
-        "Experte LinkedIn et réseautage professionnel", 
-        "Professionnelle, stratégique et connectée."
-    ),
-    'marco': AIAgent(
-        "Marco",
-        "Spécialiste des réseaux sociaux et marketing",
-        "Créatif, tendance et engageant."
-    ),
-    'sofia': AIAgent(
-        "Sofia",
-        "Organisatrice de calendrier et planification",
-        "Précise, organisée et anticipatrice."
-    ),
-    'kai': AIAgent(
-        "Kai",
-        "Assistant conversationnel général",
-        "Amical, curieux et adaptable."
-    )
-}
 
 # Routes principales
 @app.route('/')
 def index():
     """Page d'accueil"""
-    # NOTE: L'erreur initiale était TemplateNotFound: index.html
-    # Vous avez probablement renommé le fichier en chat.html, je garde votre dernière version.
     return render_template('chat.html')
 
 @app.route('/settings')
@@ -425,14 +430,20 @@ def settings():
 
 @app.route('/api/save_key', methods=['POST'])
 def save_api_key():
-    """Sauvegarde la clé API Gemini uniquement"""
+    """Sauvegarde la clé API Gemini uniquement (sensibilité à la casse corrigée)"""
     try:
         data = request.get_json()
-        provider = data.get('provider')
+        
+        # 1. Conversion en minuscules pour la robustesse (CORRECTION DE LA CASSE)
+        provider = data.get('provider', '').lower() 
         api_key = data.get('api_key')
         
+        # 2. Vérification sur le fournisseur converti en minuscules
         if provider != 'gemini':
-             return jsonify({'success': False, 'message': 'Seul le fournisseur "gemini" est supporté dans cette version.'})
+             return jsonify({
+                 'success': False, 
+                 'message': 'Seul le fournisseur "gemini" est supporté dans cette version. (Le champ "Service API" doit contenir "gemini")'
+             })
 
         if not provider or not api_key:
             return jsonify({'success': False, 'message': 'Clé API requise'})
