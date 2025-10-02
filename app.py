@@ -1,18 +1,20 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+WaveAI - Système d'Agents IA (Google Gemini ONLY)
+Version: GEMINI ONLY - Stabilité maximale et correction JSON finale
+"""
+
 import os
 import json
 import logging
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 import requests
-import psycopg2 # Nécessite 'psycopg2-binary' dans requirements.txt
-from contextlib import contextmanager
 
-# Importez AVAILABLE_TOOLS (assurez-vous que tools.py est présent)
-try:
-    from tools import AVAILABLE_TOOLS 
-except ImportError:
-    # Utilisation d'un dictionnaire vide si tools.py n'est pas trouvé
-    AVAILABLE_TOOLS = {}
+# -- DATABASE IMPORTS AND CONFIGURATION (POSTGRESQL VERSION) --
+import psycopg2
+from urllib.parse import urlparse
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -22,36 +24,47 @@ app = Flask(__name__)
 # Lit la clé secrète depuis l'environnement (SECRET_KEY)
 app.secret_key = os.environ.get('SECRET_KEY', 'waveai-secret-key-2024')
 
-# --- Configuration PostgreSQL ---
+# Configuration de la base de données (PostgreSQL)
 DATABASE_URL = os.environ.get('DATABASE_URL')
-if not DATABASE_URL:
-    logger.error("La variable d'environnement DATABASE_URL n'est pas définie.")
 
-@contextmanager
+# Configuration de l'API Gemini
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}"
+
 def get_db_connection():
-    """Fournit une connexion à la base de données PostgreSQL."""
+    """Crée et retourne une connexion à la base de données PostgreSQL."""
     if not DATABASE_URL:
         raise Exception("DATABASE_URL non défini.")
-    conn = None
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        yield conn
-    finally:
-        if conn:
-            conn.close()
-
-# --- Configuration de l'API Gemini ---
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent" 
+    
+    # Parse l'URL de la base de données (nécessaire pour Render/Heroku)
+    result = urlparse(DATABASE_URL)
+    username = result.username
+    password = result.password
+    database = result.path[1:]
+    hostname = result.hostname
+    port = result.port
+    
+    conn = psycopg2.connect(
+        database=database,
+        user=username,
+        password=password,
+        host=hostname,
+        port=port
+    )
+    return conn
 
 class APIManager:
-    """Gestionnaire pour la clé Gemini et autres services."""
+    """Gestionnaire simplifié pour la clé Gemini et la DB (PostgreSQL)"""
     
     def __init__(self):
-        pass
+        # L'initialisation est appelée dans le __main__
+        pass 
         
     def init_database(self):
-        """Initialise la base de données PostgreSQL (tables)."""
+        """
+        Initialise la base de données PostgreSQL (tables) et effectue la migration.
+        CORRECTION: Ajout de la logique ALTER TABLE pour la colonne 'created_at'.
+        """
         if not DATABASE_URL:
             logger.error("Initialisation DB échouée: DATABASE_URL non défini.")
             return
@@ -60,7 +73,7 @@ class APIManager:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
-                # Table pour les clés API
+                # 1. Création de la table api_keys (avec le schéma complet)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS api_keys (
                         provider TEXT PRIMARY KEY,
@@ -71,21 +84,22 @@ class APIManager:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
+                
+                # 2. **CORRECTION DE MIGRATION** : Ajout de la colonne manquante si la table existait
+                try:
+                    # Tente de sélectionner la colonne (échoue si elle n'existe pas)
+                    cursor.execute("SELECT created_at FROM api_keys LIMIT 0")
+                except psycopg2.ProgrammingError as e:
+                    # Si l'erreur est liée à la colonne manquante
+                    if 'created_at' in str(e):
+                        conn.rollback() # Annule la transaction ratée
+                        # Ajout de la colonne manquante avec une valeur par défaut
+                        cursor.execute("ALTER TABLE api_keys ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                        logger.info("Migration DB: Colonne 'created_at' ajoutée à la table api_keys.")
+                    else:
+                        raise # Relance l'erreur si elle n'est pas celle attendue
 
-                # S'assurer que 'gemini' est au moins présent si la clé est dans l'ENV
-                gemini_key_from_env = os.environ.get('GEMINI_API_KEY')
-                if gemini_key_from_env:
-                    cursor.execute(
-                        """
-                        INSERT INTO api_keys (provider, api_key, is_active, last_tested, test_status)
-                        VALUES ('gemini', %s, TRUE, NOW(), 'untested')
-                        ON CONFLICT (provider) DO UPDATE
-                        SET api_key = EXCLUDED.api_key;
-                        """,
-                        (gemini_key_from_env,)
-                    )
-
-                # Table pour les tâches planifiées (si on utilise la DB Postgre)
+                # 3. Création de la table scheduled_tasks (ajoutée pour la complétude de la v4-6)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS scheduled_tasks (
                         id SERIAL PRIMARY KEY,
@@ -100,200 +114,383 @@ class APIManager:
                 """)
                 
                 conn.commit()
-                logger.info("Base de données PostgreSQL initialisée avec succès")
+                logger.info("Base de données PostgreSQL initialisée/mise à jour avec succès")
         except Exception as e:
-            logger.error(f"Erreur lors de l'initialisation de la base de données PostgreSQL: {e}")
-            # Ne pas relancer l'exception ici pour permettre au serveur de démarrer (avec avertissement)
-
-    def get_api_key(self, provider):
-        """Récupère la clé API la plus récente pour un fournisseur."""
-        # Priorité à la variable d'environnement pour la clé principale (Gemini)
-        if provider.lower() == 'gemini':
-            env_key = os.environ.get('GEMINI_API_KEY')
-            if env_key:
-                return env_key
-        
+            logger.error(f"Erreur lors de l'initialisation/mise à jour de la base de données PostgreSQL: {e}")
+            raise 
+    
+    def save_api_key(self, provider, api_key):
+        """Sauvegarde la clé API Gemini (utilise ON CONFLICT pour PostgreSQL)"""
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
+                
                 cursor.execute(
-                    "SELECT api_key FROM api_keys WHERE provider = %s AND is_active = TRUE ORDER BY created_at DESC LIMIT 1",
-                    (provider.lower(),)
+                    """
+                    INSERT INTO api_keys (provider, api_key, is_active, created_at)
+                    VALUES (%s, %s, TRUE, CURRENT_TIMESTAMP)
+                    ON CONFLICT (provider) DO UPDATE
+                    SET api_key = EXCLUDED.api_key, 
+                        is_active = EXCLUDED.is_active;
+                    """, 
+                    (provider, api_key)
                 )
-                result = cursor.fetchone()
-                return result[0] if result else None
+                
+                conn.commit()
+                logger.info(f"Clé API sauvegardée pour {provider}")
+                return True
+            
         except Exception as e:
-            logger.error(f"Erreur DB lors de la récupération de la clé pour {provider}: {e}")
-            return None
-
-api_manager = APIManager()
-
-
-class Agent:
-    """Classe de base pour tous les agents IA."""
+            logger.error(f"Erreur lors de la sauvegarde de la clé {provider}: {e}")
+            return False
     
-    def __init__(self, name, system_prompt, model=GEMINI_MODEL, tools=None):
-        self.name = name
-        self.system_prompt = system_prompt
-        self.model = model
-        self.tools = tools if tools is not None else AVAILABLE_TOOLS
+    def get_api_key(self, provider='gemini'):
+        """
+        Récupère la clé API Gemini.
+        PRIORITÉ : 1. Variable d'Environnement (GEMINI_API_KEY) > 2. Base de Données
+        """
+        if provider == 'gemini':
+            # 1. Tenter de lire depuis la variable d'environnement (Render)
+            env_key = os.getenv('GEMINI_API_KEY')
+            if env_key:
+                return env_key
+        
+        # 2. Lire depuis la base de données (clé entrée via l'interface)
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute('''
+                    SELECT api_key FROM api_keys 
+                    WHERE provider = %s AND is_active = TRUE
+                ''', (provider,))
+                
+                result = cursor.fetchone()
+                
+                return result[0] if result else None
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la récupération de la clé {provider}: {e}")
+            return None
+    
+    def get_api_status(self, provider='gemini'):
+        """Récupère le statut de l'API Gemini"""
+        try:
+            # Note: Le code est simplifié pour ne renvoyer que le statut de Gemini.
+            # La requête SELECT utilise maintenant la colonne created_at, sécurisée par init_database.
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute('''
+                    SELECT api_key, test_status, last_tested, created_at 
+                    FROM api_keys 
+                    WHERE provider = %s
+                ''', (provider,))
+                
+                result = cursor.fetchone()
+                
+            key_from_db = result[0] if result else None
+            status = result[1] if result else 'missing'
+            last_tested = result[2] if result else None
+            created_at = result[3] if result else None
 
-    def generate_response(self, user_message):
-        api_key = api_manager.get_api_key('gemini')
-        if not api_key:
+            # Vérifier l'ENV
+            key_from_env = os.getenv('GEMINI_API_KEY')
+            
+            is_configured = (key_from_db is not None) or (key_from_env is not None)
+            key_to_display = key_from_env if key_from_env else key_from_db
+
             return {
-                'success': False,
-                'agent': self.name,
-                'response': "ERREUR: Clé API Gemini manquante ou invalide. Veuillez configurer la clé sur la page /settings.",
-                'provider': 'None',
-                'api_working': False
+                'configured': is_configured,
+                'key_preview': key_to_display[:8] + '...' if key_to_display and len(key_to_display) > 8 else (key_to_display if key_to_display else 'N/A'),
+                'status': status,
+                'last_tested': last_tested.isoformat() if last_tested else None,
+                'created_at': created_at.isoformat() if created_at else None,
+                'model': GEMINI_MODEL
+            }
+            
+        except Exception as e:
+            logger.error(f"Erreur statut APIs: {e}")
+            return {
+                'configured': False,
+                'key_preview': 'N/A',
+                'status': 'error',
+                'last_tested': None,
+                'model': GEMINI_MODEL
             }
 
-        url = GEMINI_API_URL.format(self.model)
-        
-        content = [
-            {"role": "user", "parts": [{"text": user_message}]}
-        ]
-        
-        headers = {
-            "Content-Type": "application/json"
-        }
+    def log_test_result(self, provider, status):
+        """Mettre à jour le statut du test"""
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute('''
+                    UPDATE api_keys 
+                    SET test_status = %s, last_tested = CURRENT_TIMESTAMP
+                    WHERE provider = %s
+                ''', (status, provider))
+                
+                conn.commit()
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'enregistrement du test {provider}: {e}")
 
-        request_body = {
-            "contents": content,
-            "config": {
-                "systemInstruction": self.system_prompt
-            }
-        }
+    def test_gemini_api(self):
+        """Test simple de l'API Gemini"""
+        api_key = self.get_api_key('gemini')
         
-        full_url = f"{url}?key={api_key}"
+        if not api_key:
+            self.log_test_result('gemini', 'missing')
+            return False, "Clé API Gemini introuvable.", None
         
         try:
-            response = requests.post(full_url, headers=headers, json=request_body)
-            response.raise_for_status()
-            data = response.json()
+            logger.info(f"Test du modèle Gemini: {GEMINI_MODEL}")
             
-            if data and 'candidates' in data and data['candidates']:
-                text_response = data['candidates'][0]['content']['parts'][0]['text']
-                
-                return {
-                    'success': True,
-                    'agent': self.name,
-                    'response': text_response,
-                    'provider': 'Gemini',
-                    'api_working': True
+            test_prompt = "Dis 'OK' et rien d'autre."
+            
+            url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
+            
+            # Le test fonctionne avec cette structure generationConfig
+            payload = {
+                "contents": [
+                    {"role": "user", "parts": [{"text": test_prompt}]}
+                ],
+                "generationConfig": { 
+                    "maxOutputTokens": 10,
+                    "temperature": 0.0
                 }
-            
-            return {
-                'success': False,
-                'agent': self.name,
-                'response': "La réponse de l'IA est vide ou n'a pas le format attendu.",
-                'provider': 'Gemini',
-                'api_working': True
             }
             
-        except requests.exceptions.HTTPError as errh:
-            logger.error(f"Erreur HTTP Gemini: {errh}")
-            return {
-                'success': False,
-                'agent': self.name,
-                'response': f"Erreur HTTP: {errh}. Clé API peut-être invalide ou épuisée.",
-                'provider': 'Gemini',
-                'api_working': False
-            }
+            response = requests.post(url, json=payload, timeout=20)
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Extraction de la réponse pour Gemini
+                if 'candidates' in result and result['candidates']:
+                    content = result['candidates'][0]['content']
+                    if 'parts' in content and content['parts']:
+                        text = content['parts'][0].get('text', '').strip().upper()
+                        if 'OK' in text or 'OK' == text:
+                            self.log_test_result('gemini', 'success')
+                            return True, "API Gemini fonctionnelle.", None
+                
+                # Échec du test malgré le statut 200
+                self.log_test_result('gemini', 'error')
+                return False, f"API Gemini : Réponse inattendue. {response.text}", None
+
+            else:
+                error_msg = response.json().get('error', {}).get('message', 'Erreur HTTP inconnue')
+                logger.error(f"Erreur API Gemini ({response.status_code}): {error_msg}")
+                self.log_test_result('gemini', 'error')
+                return False, f"Erreur API Gemini ({response.status_code}): {error_msg}", None
+            
+        except requests.exceptions.Timeout:
+            self.log_test_result('gemini', 'error')
+            return False, "Délai d'attente de l'API Gemini dépassé.", None
         except Exception as e:
-            logger.error(f"Erreur lors de l'appel à l'API Gemini: {e}")
-            return {
-                'success': False,
-                'agent': self.name,
-                'response': f"Erreur inattendue: {str(e)}",
-                'provider': 'Gemini',
-                'api_working': False
+            logger.error(f"Erreur lors du test Gemini: {e}")
+            self.log_test_result('gemini', 'error')
+            return False, f"Erreur non gérée lors du test Gemini: {str(e)}", None
+
+# Instance globale du gestionnaire d'APIs
+api_manager = APIManager()
+
+class AIAgent:
+    """Agent IA utilisant l'API Gemini"""
+    
+    def __init__(self, name, role, personality):
+        self.name = name
+        self.role = role
+        self.personality = personality
+    
+    def generate_response(self, message):
+        """Génère une réponse en utilisant Gemini"""
+        
+        api_key = api_manager.get_api_key('gemini')
+        if not api_key:
+            return self._fallback_response()
+        
+        # Contexte personnalisé pour l'agent (System Instruction)
+        system_instruction = f"""Tu es {self.name}, {self.role}.
+Personnalité: {self.personality}
+Réponds de manière naturelle et personnalisée selon ton rôle.
+Garde tes réponses concises et utiles (maximum 150 mots)."""
+        
+        try:
+            url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
+            
+            # Construction du payload
+            payload = {
+                "contents": [
+                    # 1. Le rôle et la personnalité sont passés en premier message utilisateur
+                    {"role": "user", "parts": [{"text": system_instruction}]},
+                    # 2. Le message de l'utilisateur est le deuxième message utilisateur
+                    {"role": "user", "parts": [{"text": message}]}
+                ],
+                "generationConfig": {
+                    "maxOutputTokens": 250,
+                    "temperature": 0.7
+                }
             }
+            
+            response = requests.post(url, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                if 'candidates' in result and result['candidates']:
+                    generated_text = result['candidates'][0]['content']['parts'][0]['text']
+                    
+                    return {
+                        'agent': self.name,
+                        'response': generated_text.strip(),
+                        'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
+                        'success': True
+                    }
+            
+            # Si l'API renvoie une erreur (quota, clé invalide, etc.)
+            error_msg = response.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response.status_code}')
+            logger.error(f"Erreur Gemini pour {self.name}: {error_msg}")
+            
+            return self._fallback_response(error_msg=error_msg)
+            
+        except Exception as e:
+            logger.error(f"Erreur non gérée lors de l'appel Gemini: {e}")
+            return self._fallback_response(error_msg=str(e))
 
+    def _fallback_response(self, error_msg=None):
+        """Réponse de fallback lorsque l'API Gemini n'est pas disponible ou échoue"""
+        fallback_responses = {
+            'kai': "Je suis Kai, votre assistant IA. Pour que je puisse vous aider, veuillez configurer la clé API Gemini dans les paramètres.",
+            'alex': "Je suis Alex. Mon accès à l'IA est désactivé. Veuillez configurer l'API Gemini pour débloquer mes conseils de productivité.",
+            'lina': "Je suis Lina. Je ne peux pas analyser votre situation sans l'API Gemini. Configurez la clé pour commencer à travailler !",
+            'marco': "Je suis Marco. Je suis en mode démo. Configurer la clé Gemini me permettra de générer des idées créatives.",
+            'sofia': "Je suis Sofia. Mon planning est en attente. Veuillez configurer l'API Gemini pour optimiser votre organisation."
+        }
+        
+        reason = "Clé API Gemini non configurée."
+        if error_msg:
+            reason = f"Erreur API: {error_msg}"
+        
+        return {
+            'agent': self.name,
+            'response': f"{fallback_responses.get(self.name.lower(), fallback_responses['kai'])} ({reason})",
+            'provider': 'Mode Démo (Gemini non configuré)',
+            'success': False
+        }
 
-# --- Définition des Agents ---
+# Création des agents (inchangé)
 agents = {
-    'kai': Agent(
-        name='Kai (Généraliste)',
-        system_prompt="Tu es Kai, un assistant IA généraliste et amical. Réponds aux questions générales, résous des problèmes simples de raisonnement ou de mathématiques, et donne des informations générales. N'utilise aucun outil pour l'instant.",
-        tools=None # Kai n'utilise aucun outil
+    'alex': AIAgent(
+        "Alex", 
+        "Assistant productivité et gestion",
+        "Expert en organisation, efficace et méthodique."
     ),
-    'alex': Agent(
-        name='Alex (Outils & Planification)',
-        system_prompt="Tu es Alex, un assistant IA spécialisé dans l'utilisation des fonctions et des outils externes. Ton objectif principal est d'utiliser tes fonctions pour interagir avec des systèmes externes (comme Gmail ou Google Agenda) pour planifier, vérifier ou envoyer des informations. Si un outil est pertinent pour la demande, tu dois le proposer ou l'utiliser. Sinon, réponds normalement.",
-        tools=AVAILABLE_TOOLS # Alex utilise les outils définis dans tools.py
+    'lina': AIAgent(
+        "Lina",
+        "Experte LinkedIn et réseautage professionnel", 
+        "Professionnelle, stratégique et connectée."
     ),
-    'sophie': Agent(
-        name='Sophie (Analyste)',
-        system_prompt="Tu es Sophie, une IA spécialisée dans l'analyse de données, la structuration d'informations complexes, et la création de résumés précis. Ton style est professionnel, détaillé, et factuel. Concentre-toi sur la clarté et l'organisation des réponses.",
-        tools=None
+    'marco': AIAgent(
+        "Marco",
+        "Spécialiste des réseaux sociaux et marketing",
+        "Créatif, tendance et engageant."
+    ),
+    'sofia': AIAgent(
+        "Sofia",
+        "Organisatrice de calendrier et planification",
+        "Précise, organisée et anticipatrice."
+    ),
+    'kai': AIAgent(
+        "Kai",
+        "Assistant conversationnel général",
+        "Amical, curieux et adaptable."
     )
 }
 
-
-# --- Routes Flask ---
-
+# Routes principales
 @app.route('/')
-def home():
-    """Page d'accueil."""
-    api_key_status = api_manager.get_api_key('gemini') is not None
-    return render_template('index.html', api_key_status=api_key_status)
+def index():
+    """Page d'accueil"""
+    # NOTE: L'erreur initiale était TemplateNotFound: index.html
+    # Vous avez probablement renommé le fichier en chat.html, je garde votre dernière version.
+    return render_template('chat.html')
 
 @app.route('/settings')
 def settings():
-    """Page de gestion des clés API."""
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            # Récupère toutes les clés (pour affichage)
-            cursor.execute("SELECT provider, is_active, last_tested, test_status, created_at FROM api_keys ORDER BY provider")
-            api_keys = cursor.fetchall()
-            
-            # Mettre en forme les données pour le template
-            keys_data = []
-            for provider, is_active, last_tested, test_status, created_at in api_keys:
-                keys_data.append({
-                    'provider': provider.upper(),
-                    'is_active': 'Oui' if is_active else 'Non',
-                    # Formatage des dates pour l'affichage (éviter les erreurs si la date est None)
-                    'last_tested': last_tested.strftime('%Y-%m-%d %H:%M:%S') if last_tested else 'N/A',
-                    'test_status': test_status
-                })
-                
-            return render_template('settings.html', keys=keys_data)
-    except Exception as e:
-        logger.error(f"Erreur lors de l'affichage des paramètres: {e}")
-        return render_template('settings.html', error=f"Erreur DB: {str(e)}. Vérifiez DATABASE_URL.", keys=[])
+    """Page de configuration"""
+    return render_template('settings.html')
 
 @app.route('/api/save_key', methods=['POST'])
-def save_api_key_endpoint():
-    """Endpoint pour enregistrer une clé API."""
-    data = request.get_json()
-    provider = data.get('provider')
-    api_key = data.get('api_key')
-    
-    if not provider or not api_key:
-        return jsonify({'success': False, 'message': 'Provider et Clé API requis.'}), 400
-
+def save_api_key():
+    """Sauvegarde la clé API Gemini uniquement"""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            # Utiliser ON CONFLICT DO UPDATE pour PostgreSQL (UPSERT)
-            cursor.execute(
-                """
-                INSERT INTO api_keys (provider, api_key, is_active, last_tested, test_status)
-                VALUES (%s, %s, TRUE, NOW(), 'untested')
-                ON CONFLICT (provider) DO UPDATE
-                SET api_key = EXCLUDED.api_key, is_active = TRUE, last_tested = NOW(), test_status = 'untested';
-                """,
-                (provider.lower(), api_key)
-            )
-            conn.commit()
-            return jsonify({'success': True, 'message': f'Clé {provider.upper()} enregistrée avec succès.'})
+        data = request.get_json()
+        provider = data.get('provider')
+        api_key = data.get('api_key')
+        
+        if provider != 'gemini':
+             return jsonify({'success': False, 'message': 'Seul le fournisseur "gemini" est supporté dans cette version.'})
+
+        if not provider or not api_key:
+            return jsonify({'success': False, 'message': 'Clé API requise'})
+        
+        success = api_manager.save_api_key(provider, api_key)
+        
+        if success:
+            return jsonify({'success': True, 'message': f'Clé {provider} sauvegardée. Veuillez cliquer sur "Tester l\'API" pour vérifier.'})
+        else:
+            return jsonify({'success': False, 'message': 'Erreur lors de la sauvegarde'})
+            
     except Exception as e:
-        logger.error(f"Erreur lors de l'enregistrement de la clé: {e}")
-        return jsonify({'success': False, 'message': f'Erreur DB: {str(e)}. Vérifiez DATABASE_URL.'}), 500
+        logger.error(f"Erreur sauvegarde clé: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/test_apis', methods=['POST'])
+def test_apis():
+    """Test l'API Gemini configurée"""
+    try:
+        success, message, _ = api_manager.test_gemini_api()
+        
+        return jsonify({
+            'success': True,
+            'results': {
+                'gemini': {
+                    'success': success,
+                    'message': message,
+                    'tested_at': datetime.now().isoformat()
+                }
+            },
+            'summary': {
+                'total': 1,
+                'working': 1 if success else 0,
+                'failed': 0 if success else 1
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Erreur test APIs: {e}")
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/get_api_status', methods=['GET'])
+def get_api_status():
+    """Récupère le statut de l'API Gemini uniquement"""
+    try:
+        status_data = api_manager.get_api_status('gemini')
+        
+        return jsonify({
+            'success': True,
+            'apis': {
+                'gemini': status_data
+            },
+            'total_configured': 1 if status_data['configured'] else 0
+        })
+        
+    except Exception as e:
+        logger.error(f"Erreur statut APIs: {e}")
+        return jsonify({'success': False, 'message': str(e)})
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -304,7 +501,7 @@ def chat():
         agent_name = data.get('agent', 'kai').lower()
         
         if not message:
-            return jsonify({'success': False, 'message': 'Message vide'}), 400
+            return jsonify({'success': False, 'message': 'Message vide'})
         
         if agent_name not in agents:
             agent_name = 'kai'
@@ -313,29 +510,31 @@ def chat():
         response_data = agent.generate_response(message)
         
         return jsonify({
-            'success': response_data['success'],
+            'success': True,
             'agent': response_data['agent'],
             'response': response_data['response'],
             'provider': response_data['provider'],
-            'api_working': response_data['api_working']
+            'api_working': response_data['success']
         })
         
     except Exception as e:
         logger.error(f"Erreur chat: {e}")
         return jsonify({
             'success': False, 
-            'message': f"Erreur lors du traitement: {str(e)}"
-        }), 500
-
-# --- Démarrage ---
-
-# Exécution initiale pour l'initialisation de la DB
-try:
-    api_manager.init_database()
-except Exception as e:
-    logger.warning(f"L'initialisation de la DB a échoué: {e}")
+            'message': f'Erreur lors du traitement: {str(e)}'
+        })
 
 if __name__ == '__main__':
-    logger.info("Démarrage de WaveAI...")
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    try:
+        logger.info("Démarrage de WaveAI...")
+        
+        # Initialisation de la DB est ici
+        api_manager.init_database()
+        logger.info("Système initialisé avec succès")
+        
+        port = int(os.environ.get('PORT', 5000))
+        app.run(host='0.0.0.0', port=port, debug=False)
+        
+    except Exception as e:
+        logger.error(f"Erreur critique au démarrage: {e}")
+        raise
