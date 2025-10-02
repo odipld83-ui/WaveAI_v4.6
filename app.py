@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-\n
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
 Version: GEMINI ONLY - Stabilité maximale et corrections finales PostgreSQL
@@ -63,7 +63,7 @@ class APIManager:
     def init_database(self):
         """
         Initialise la base de données PostgreSQL (tables) et effectue la migration.
-        CECI EST LA VRAIE FIX: Assure que la colonne manquante est ajoutée.
+        Assure que la colonne 'created_at' est ajoutée si elle manque.
         """
         if not DATABASE_URL:
             logger.error("Initialisation DB échouée: DATABASE_URL non défini.")
@@ -85,21 +85,18 @@ class APIManager:
                     )
                 """)
                 
-                # 2. **CORRECTION DE MIGRATION** : Ajout de la colonne manquante si la table existait
+                # 2. CORRECTION DE MIGRATION : Ajout de la colonne manquante si la table existait
                 try:
-                    # Tente de sélectionner la colonne (échoue si elle n'existe pas)
                     cursor.execute("SELECT created_at FROM api_keys LIMIT 0")
                 except psycopg2.ProgrammingError as e:
-                    # Si l'erreur est liée à la colonne manquante
                     if 'created_at' in str(e):
                         conn.rollback() # Annule la transaction ratée
-                        # Ajout de la colonne manquante avec une valeur par défaut
                         cursor.execute("ALTER TABLE api_keys ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                         logger.info("Migration DB: Colonne 'created_at' ajoutée à la table api_keys.")
                     else:
-                        raise # Relance l'erreur si elle n'est pas celle attendue
+                        raise 
 
-                # 3. Création de la table scheduled_tasks (ajoutée pour la complétude de la v4-6)
+                # 3. Création de la table scheduled_tasks
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS scheduled_tasks (
                         id SERIAL PRIMARY KEY,
@@ -121,15 +118,13 @@ class APIManager:
     
     def save_api_key(self, provider, api_key):
         """
-        Sauvegarde la clé API Gemini. 
-        Requête simplifiée pour éviter le conflit "created_at" dans l'INSERT.
+        Sauvegarde la clé API Gemini. Requête simplifiée pour la robustesse.
         """
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
-                # REQUISE : La migration dans init_database doit avoir ajouté la colonne !
-                # On retire 'created_at' de la clause INSERT car la valeur par défaut est gérée par la DB
+                # On retire 'created_at' de l'INSERT car la DB gère la valeur par défaut
                 cursor.execute(
                     """
                     INSERT INTO api_keys (provider, api_key, is_active)
@@ -150,30 +145,21 @@ class APIManager:
             return False
     
     def get_api_key(self, provider='gemini'):
-        """
-        Récupère la clé API Gemini.
-        PRIORITÉ : 1. Variable d'Environnement (GEMINI_API_KEY) > 2. Base de Données
-        """
+        """Récupère la clé API Gemini."""
         if provider == 'gemini':
-            # 1. Tenter de lire depuis la variable d'environnement (Render)
             env_key = os.getenv('GEMINI_API_KEY')
             if env_key:
                 return env_key
         
-        # 2. Lire depuis la base de données (clé entrée via l'interface)
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                
                 cursor.execute('''
                     SELECT api_key FROM api_keys 
                     WHERE provider = %s AND is_active = TRUE
                 ''', (provider,))
-                
                 result = cursor.fetchone()
-                
                 return result[0] if result else None
-            
         except Exception as e:
             logger.error(f"Erreur lors de la récupération de la clé {provider}: {e}")
             return None
@@ -181,17 +167,13 @@ class APIManager:
     def get_api_status(self, provider='gemini'):
         """Récupère le statut de l'API Gemini"""
         try:
-            # Note: Le code est simplifié pour ne renvoyer que le statut de Gemini.
-            # La requête SELECT utilise maintenant la colonne created_at, sécurisée par init_database.
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                
                 cursor.execute('''
                     SELECT api_key, test_status, last_tested, created_at 
                     FROM api_keys 
                     WHERE provider = %s
                 ''', (provider,))
-                
                 result = cursor.fetchone()
                 
             key_from_db = result[0] if result else None
@@ -199,7 +181,6 @@ class APIManager:
             last_tested = result[2] if result else None
             created_at = result[3] if result else None
 
-            # Vérifier l'ENV
             key_from_env = os.getenv('GEMINI_API_KEY')
             
             is_configured = (key_from_db is not None) or (key_from_env is not None)
@@ -215,7 +196,6 @@ class APIManager:
             }
             
         except Exception as e:
-            # Cette erreur était 'column "created_at" does not exist' avant la correction de migration
             logger.error(f"Erreur statut APIs: {e}")
             return {
                 'configured': False,
@@ -230,15 +210,12 @@ class APIManager:
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                
                 cursor.execute('''
                     UPDATE api_keys 
                     SET test_status = %s, last_tested = CURRENT_TIMESTAMP
                     WHERE provider = %s
                 ''', (status, provider))
-                
                 conn.commit()
-            
         except Exception as e:
             logger.error(f"Erreur lors de l'enregistrement du test {provider}: {e}")
 
@@ -252,12 +229,8 @@ class APIManager:
         
         try:
             logger.info(f"Test du modèle Gemini: {GEMINI_MODEL}")
-            
             test_prompt = "Dis 'OK' et rien d'autre."
-            
             url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
-            
-            # Le test fonctionne avec cette structure generationConfig
             payload = {
                 "contents": [
                     {"role": "user", "parts": [{"text": test_prompt}]}
@@ -272,8 +245,6 @@ class APIManager:
             
             if response.status_code == 200:
                 result = response.json()
-                
-                # Extraction de la réponse pour Gemini
                 if 'candidates' in result and result['candidates']:
                     content = result['candidates'][0]['content']
                     if 'parts' in content and content['parts']:
@@ -282,7 +253,6 @@ class APIManager:
                             self.log_test_result('gemini', 'success')
                             return True, "API Gemini fonctionnelle.", None
                 
-                # Échec du test malgré le statut 200
                 self.log_test_result('gemini', 'error')
                 return False, f"API Gemini : Réponse inattendue. {response.text}", None
 
@@ -292,49 +262,15 @@ class APIManager:
                 self.log_test_result('gemini', 'error')
                 return False, f"Erreur API Gemini ({response.status_code}): {error_msg}", None
             
-        except requests.exceptions.Timeout:
-            self.log_test_result('gemini', 'error')
-            return False, "Délai d'attente de l'API Gemini dépassé.", None
         except Exception as e:
             logger.error(f"Erreur lors du test Gemini: {e}")
             self.log_test_result('gemini', 'error')
             return False, f"Erreur non gérée lors du test Gemini: {str(e)}", None
 
-# Instance globale du gestionnaire d'APIs
-api_manager = APIManager()
-
-# Création des agents (inchangé)
-# ... (Gardez la définition des agents telle quelle)
-agents = {
-    'alex': AIAgent(
-        "Alex", 
-        "Assistant productivité et gestion",
-        "Expert en organisation, efficace et méthodique."
-    ),
-    'lina': AIAgent(
-        "Lina",
-        "Experte LinkedIn et réseautage professionnel", 
-        "Professionnelle, stratégique et connectée."
-    ),
-    'marco': AIAgent(
-        "Marco",
-        "Spécialiste des réseaux sociaux et marketing",
-        "Créatif, tendance et engageant."
-    ),
-    'sofia': AIAgent(
-        "Sofia",
-        "Organisatrice de calendrier et planification",
-        "Précise, organisée et anticipatrice."
-    ),
-    'kai': AIAgent(
-        "Kai",
-        "Assistant conversationnel général",
-        "Amical, curieux et adaptable."
-    )
-}
-
+# --- DÉFINITION DE LA CLASSE AIAgent (DOIT ÊTRE AVANT L'INSTANCE AGENTS) ---
 class AIAgent:
-    # ... (Définition de la classe AIAgent inchangée, pour la concision)
+    """Agent IA utilisant l'API Gemini"""
+    
     def __init__(self, name, role, personality):
         self.name = name
         self.role = role
@@ -347,7 +283,6 @@ class AIAgent:
         if not api_key:
             return self._fallback_response()
         
-        # Contexte personnalisé pour l'agent (System Instruction)
         system_instruction = f"""Tu es {self.name}, {self.role}.
 Personnalité: {self.personality}
 Réponds de manière naturelle et personnalisée selon ton rôle.
@@ -356,12 +291,9 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
         try:
             url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
             
-            # Construction du payload
             payload = {
                 "contents": [
-                    # 1. Le rôle et la personnalité sont passés en premier message utilisateur
                     {"role": "user", "parts": [{"text": system_instruction}]},
-                    # 2. Le message de l'utilisateur est le deuxième message utilisateur
                     {"role": "user", "parts": [{"text": message}]}
                 ],
                 "generationConfig": {
@@ -374,10 +306,8 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
             
             if response.status_code == 200:
                 result = response.json()
-                
                 if 'candidates' in result and result['candidates']:
                     generated_text = result['candidates'][0]['content']['parts'][0]['text']
-                    
                     return {
                         'agent': self.name,
                         'response': generated_text.strip(),
@@ -385,7 +315,6 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
                         'success': True
                     }
             
-            # Si l'API renvoie une erreur (quota, clé invalide, etc.)
             error_msg = response.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response.status_code}')
             logger.error(f"Erreur Gemini pour {self.name}: {error_msg}")
             
@@ -417,6 +346,38 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
         }
 
 
+# Instance globale du gestionnaire d'APIs
+api_manager = APIManager()
+
+# Création des agents (UTILISE AIAgent)
+agents = {
+    'alex': AIAgent(
+        "Alex", 
+        "Assistant productivité et gestion",
+        "Expert en organisation, efficace et méthodique."
+    ),
+    'lina': AIAgent(
+        "Lina",
+        "Experte LinkedIn et réseautage professionnel", 
+        "Professionnelle, stratégique et connectée."
+    ),
+    'marco': AIAgent(
+        "Marco",
+        "Spécialiste des réseaux sociaux et marketing",
+        "Créatif, tendance et engageant."
+    ),
+    'sofia': AIAgent(
+        "Sofia",
+        "Organisatrice de calendrier et planification",
+        "Précise, organisée et anticipatrice."
+    ),
+    'kai': AIAgent(
+        "Kai",
+        "Assistant conversationnel général",
+        "Amical, curieux et adaptable."
+    )
+}
+
 # Routes principales
 @app.route('/')
 def index():
@@ -434,11 +395,10 @@ def save_api_key():
     try:
         data = request.get_json()
         
-        # 1. Conversion en minuscules pour la robustesse (CORRECTION DE LA CASSE)
+        # Conversion en minuscules pour la robustesse (CORRECTION DE LA CASSE)
         provider = data.get('provider', '').lower() 
         api_key = data.get('api_key')
         
-        # 2. Vérification sur le fournisseur converti en minuscules
         if provider != 'gemini':
              return jsonify({
                  'success': False, 
