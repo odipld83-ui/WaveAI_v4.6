@@ -522,6 +522,8 @@
         let currentAgent = 'kai';
         let isRecording = false;
         let recognition = null;
+        // 💡 AJOUT CLÉ 1: Variable pour stocker l'historique de la conversation (format API Gemini)
+        let conversationHistory = []; 
 
         // Configuration des agents
         const agentConfig = {
@@ -614,6 +616,9 @@
         function selectAgent(agentName) {
             currentAgent = agentName;
             
+            // 💡 MODIFICATION CLÉ 2: Réinitialiser l'historique lors du changement d'agent
+            conversationHistory = [];
+
             // Mettre à jour l'interface
             document.querySelectorAll('.agent-card').forEach(card => {
                 card.classList.remove('active');
@@ -635,7 +640,7 @@
             
             if (!message) return;
 
-            // Ajouter le message utilisateur
+            // Ajouter le message utilisateur à l'interface
             addMessage('user', 'Vous', message);
             input.value = '';
             autoResize();
@@ -651,7 +656,9 @@
                     },
                     body: JSON.stringify({
                         message: message,
-                        agent: currentAgent
+                        agent: currentAgent,
+                        // 💡 MODIFICATION CLÉ 3: Inclure l'historique de la conversation
+                        history: conversationHistory 
                     })
                 });
 
@@ -661,10 +668,17 @@
                 document.getElementById(loadingId).remove();
 
                 if (data.success) {
+                    // Ajouter la réponse de l'agent à l'interface
                     addMessage('agent', data.agent, data.response);
                     updateAPIStatus(data.api_working, data.provider);
+                    
+                    // 💡 MODIFICATION CLÉ 4: Mettre à jour l'historique local avec celui du backend
+                    // Le backend renvoie l'historique complet pour la prochaine requête
+                    conversationHistory = data.history || []; 
+
                 } else {
                     addMessage('agent', 'Erreur', data.message || 'Erreur lors du traitement', false, 'error');
+                    // En cas d'erreur, ne pas modifier l'historique pour essayer de récupérer
                 }
 
             } catch (error) {
