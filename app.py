@@ -1,270 +1,230 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: STABLE POSTGRESQL + Worker Support (Prêt pour Gunicorn)
-"""
-
 import os
 import json
 import logging
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 import requests
-# Nouvelle dépendance pour PostgreSQL
-import psycopg2 
-from urllib.parse import urlparse
+import psycopg2 # Nécessite 'psycopg2-binary' dans requirements.txt
+from contextlib import contextmanager
 
-# Importer les outils réels (nécessite tools.py mis à jour)
-from tools import AVAILABLE_TOOLS 
+# Importez AVAILABLE_TOOLS (assurez-vous que tools.py est présent et contient ce dict)
+try:
+    from tools import AVAILABLE_TOOLS 
+except ImportError:
+    # Utilisation d'un dictionnaire vide si tools.py n'est pas trouvé
+    AVAILABLE_TOOLS = {}
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+# Lit la clé secrète depuis l'environnement (SECRET_KEY)
 app.secret_key = os.environ.get('SECRET_KEY', 'waveai-secret-key-2024')
 
-# Configuration de l'API Gemini
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}"
+# --- Configuration PostgreSQL ---
+DATABASE_URL = os.environ.get('DATABASE_URL')
+if not DATABASE_URL:
+    logger.error("La variable d'environnement DATABASE_URL n'est pas définie.")
 
-
-# --- Nouvelle Fonction de Connexion DB ---
+@contextmanager
 def get_db_connection():
-    """Établit une connexion à PostgreSQL en utilisant DATABASE_URL."""
-    DATABASE_URL = os.environ.get('DATABASE_URL')
+    """Fournit une connexion à la base de données PostgreSQL."""
     if not DATABASE_URL:
-        logger.error("La variable d'environnement DATABASE_URL est manquante.")
-        raise EnvironmentError("Base de données non configurée. Impossible de se connecter.")
+        # Lève une erreur pour signaler l'absence de DB_URL (critique pour Render)
+        raise Exception("DATABASE_URL non défini.")
+    conn = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        yield conn
+    finally:
+        if conn:
+            conn.close()
 
-    result = urlparse(DATABASE_URL)
-    return psycopg2.connect(
-        database=result.path[1:],
-        user=result.username,
-        password=result.password,
-        host=result.hostname,
-        port=result.port,
-        sslmode='require' # Requis par Render pour les connexions externes
-    )
+# --- Configuration de l'API Gemini ---
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent" 
 
-# --- Classes de Gestionnaires ---
+class APIManager:
+    """Gestionnaire pour la clé Gemini et autres services."""
+    
+    def __init__(self):
+        # La base de données est initialisée une fois au démarrage
+        pass
+        
+    def init_database(self):
+        """Initialise la base de données PostgreSQL (tables)."""
+        if not DATABASE_URL:
+            logger.error("Initialisation DB échouée: DATABASE_URL non défini.")
+            return
 
-class AIAgent:
-    """Agent IA de base qui utilise l'API Gemini."""
-    def __init__(self, name, system_prompt, model=GEMINI_MODEL):
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Table pour les clés API
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS api_keys (
+                        provider TEXT PRIMARY KEY,
+                        api_key TEXT NOT NULL,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        last_tested TIMESTAMP,
+                        test_status TEXT DEFAULT 'untested',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
+                # S'assurer que 'gemini' est au moins présent si la clé est dans l'ENV
+                gemini_key_from_env = os.environ.get('GEMINI_API_KEY')
+                if gemini_key_from_env:
+                    cursor.execute(
+                        """
+                        INSERT INTO api_keys (provider, api_key, is_active, last_tested, test_status)
+                        VALUES ('gemini', %s, TRUE, NOW(), 'untested')
+                        ON CONFLICT (provider) DO UPDATE
+                        SET api_key = EXCLUDED.api_key;
+                        """,
+                        (gemini_key_from_env,)
+                    )
+
+                # Table pour les tâches planifiées (si non gérée par tools.py)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                        id SERIAL PRIMARY KEY,
+                        task_type TEXT NOT NULL,
+                        recipient TEXT NOT NULL,
+                        subject TEXT NOT NULL,
+                        body TEXT NOT NULL,
+                        scheduled_date TIMESTAMP NOT NULL,
+                        status TEXT DEFAULT 'pending',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                conn.commit()
+                logger.info("Base de données PostgreSQL initialisée avec succès")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'initialisation de la base de données PostgreSQL: {e}")
+            raise e
+
+    def get_api_key(self, provider):
+        """Récupère la clé API la plus récente pour un fournisseur."""
+        # Priorité à la variable d'environnement pour la clé principale (Gemini)
+        if provider.lower() == 'gemini':
+            env_key = os.environ.get('GEMINI_API_KEY')
+            if env_key:
+                return env_key
+        
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT api_key FROM api_keys WHERE provider = %s AND is_active = TRUE ORDER BY created_at DESC LIMIT 1",
+                    (provider.lower(),)
+                )
+                result = cursor.fetchone()
+                return result[0] if result else None
+        except Exception as e:
+            logger.error(f"Erreur DB lors de la récupération de la clé pour {provider}: {e}")
+            return None
+
+api_manager = APIManager()
+
+
+class Agent:
+    """Classe de base pour tous les agents IA."""
+    
+    def __init__(self, name, system_prompt, model=GEMINI_MODEL, tools=None):
         self.name = name
         self.system_prompt = system_prompt
         self.model = model
-        
+        self.tools = tools if tools is not None else AVAILABLE_TOOLS
+
     def generate_response(self, user_message):
-        """Génère une réponse, y compris l'utilisation des outils."""
-        gemini_api_key = api_manager.get_api_key('gemini')
-        
-        if not gemini_api_key:
+        api_key = api_manager.get_api_key('gemini')
+        if not api_key:
             return {
                 'success': False,
                 'agent': self.name,
-                'response': f"Erreur: Clé API Gemini manquante ou invalide.",
+                'response': "ERREUR: Clé API Gemini manquante ou invalide. Veuillez configurer la clé sur la page /settings.",
                 'provider': 'None',
-                'tool_call': None
+                'api_working': False
             }
-            
-        # Définition de la fonction pour l'appel d'outil
-        tool_schema = [
-            {
-                "name": name,
-                "description": tool.__doc__.strip(),
-                "parameters": {
-                    "type": "object",
-                    # Supposons que les fonctions dans tools.py sont annotées
-                    "properties": {
-                        k: {"type": "string", "description": k} 
-                        for k in tool.__annotations__.keys() if k != 'return'
-                    },
-                    "required": [
-                        k for k in tool.__annotations__.keys() if k != 'return'
-                    ]
-                }
-            } for name, tool in AVAILABLE_TOOLS.items() if tool.__doc__
-        ]
 
-        # Construction du corps de la requête
-        contents = [
+        url = GEMINI_API_URL.format(self.model)
+        
+        content = [
             {"role": "user", "parts": [{"text": user_message}]}
         ]
         
-        payload = {
-            "contents": contents,
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        request_body = {
+            "contents": content,
             "config": {
-                "systemInstruction": self.system_prompt,
-                "tools": [{"functionDeclarations": tool_schema}]
+                "systemInstruction": self.system_prompt
             }
         }
         
-        headers = {'Content-Type': 'application/json'}
-        url = GEMINI_API_URL.format(self.model, gemini_api_key)
+        # NOTE: La gestion complète des outils est plus complexe. Ici, seul l'appel simple est effectué.
+
+        full_url = f"{url}?key={api_key}"
         
         try:
-            # Premier appel à Gemini (peut demander un outil)
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response = requests.post(full_url, headers=headers, json=request_body)
             response.raise_for_status()
+            data = response.json()
             
-            response_json = response.json()
-            
-            # --- 1. Vérification de l'Appel d'Outil ---
-            if 'functionCalls' in response_json.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0]:
-                tool_calls = response_json['candidates'][0]['content']['parts'][0]['functionCalls']
-                
-                tool_results_parts = []
-                for call in tool_calls:
-                    function_name = call['name']
-                    function_args = dict(call['args'])
-                    
-                    if function_name in AVAILABLE_TOOLS:
-                        tool_function = AVAILABLE_TOOLS[function_name]
-                        
-                        logger.info(f"Appel d'outil: {function_name} avec args: {function_args}")
-                        
-                        # Exécuter l'outil (le Worker fera le travail de fond)
-                        tool_result = tool_function(**function_args)
-                        
-                        tool_results_parts.append({
-                            "functionResponse": {
-                                "name": function_name,
-                                "response": {"result": tool_result}
-                            }
-                        })
-                    
-                # --- 2. Deuxième Appel avec les Résultats d'Outil ---
-                
-                # Ajouter les résultats des outils à l'historique de la requête
-                contents.append({
-                    "role": "model", 
-                    "parts": response_json['candidates'][0]['content']['parts']
-                })
-                contents.append({
-                    "role": "tool", 
-                    "parts": tool_results_parts
-                })
-                
-                # Préparer le nouveau payload
-                payload['contents'] = contents
-                
-                # Appel final à Gemini pour obtenir la réponse textuelle
-                final_response = requests.post(url, headers=headers, json=payload, timeout=30)
-                final_response.raise_for_status()
-                final_response_json = final_response.json()
-                
-                final_text = final_response_json['candidates'][0]['content']['parts'][0]['text']
+            if data and 'candidates' in data and data['candidates']:
+                text_response = data['candidates'][0]['content']['parts'][0]['text']
                 
                 return {
                     'success': True,
                     'agent': self.name,
-                    'response': final_text,
-                    'provider': 'Gemini-Tool',
-                    'tool_call': tool_calls
+                    'response': text_response,
+                    'provider': 'Gemini',
+                    'api_working': True
                 }
-
-            # --- 3. Réponse Textuelle Directe ---
-            text_response = response_json['candidates'][0]['content']['parts'][0]['text']
             
             return {
-                'success': True,
+                'success': False,
                 'agent': self.name,
-                'response': text_response,
+                'response': "La réponse de l'IA est vide ou n'a pas le format attendu.",
                 'provider': 'Gemini',
-                'tool_call': None
+                'api_working': True
             }
             
         except requests.exceptions.HTTPError as errh:
-            logger.error(f"Erreur HTTP Gemini: {errh.response.text}")
-            return {'success': False, 'response': f"Erreur HTTP: {errh.response.status_code}. Vérifiez votre clé API.", 'agent': self.name, 'provider': 'Gemini', 'tool_call': None}
+            logger.error(f"Erreur HTTP Gemini: {errh}")
+            return {
+                'success': False,
+                'agent': self.name,
+                'response': f"Erreur HTTP: {errh}. Clé API peut-être invalide ou épuisée.",
+                'provider': 'Gemini',
+                'api_working': False
+            }
         except Exception as e:
-            logger.error(f"Erreur inattendue Gemini: {e}")
-            return {'success': False, 'response': f"Erreur inattendue: {str(e)}", 'agent': self.name, 'provider': 'Gemini', 'tool_call': None}
+            logger.error(f"Erreur lors de l'appel à l'API Gemini: {e}")
+            return {
+                'success': False,
+                'agent': self.name,
+                'response': f"Erreur inattendue: {str(e)}",
+                'provider': 'Gemini',
+                'api_working': False
+            }
 
 
-class APIManager:
-    """Gestionnaire simplifié pour la clé Gemini et l'initialisation DB (PostgreSQL)"""
-    
-    def __init__(self):
-        self.init_database()
-        
-    def init_database(self):
-        """Initialise les tables PostgreSQL si elles n'existent pas."""
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            
-            # Table pour la clé API Gemini
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS api_keys (
-                    id SERIAL PRIMARY KEY,
-                    provider TEXT UNIQUE NOT NULL,
-                    api_key TEXT NOT NULL,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    last_tested TIMESTAMP,
-                    test_status TEXT DEFAULT 'untested'
-                )
-            ''')
-            
-            # Table pour les tâches planifiées (Ajout du champ sent_at pour le worker)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS scheduled_tasks (
-                    id SERIAL PRIMARY KEY,
-                    task_type TEXT NOT NULL,
-                    recipient TEXT NOT NULL,
-                    subject TEXT NOT NULL,
-                    body TEXT NOT NULL,
-                    scheduled_date TIMESTAMP NOT NULL,
-                    status TEXT DEFAULT 'pending',
-                    sent_at TIMESTAMP
-                )
-            ''')
-            
-            conn.commit()
-            conn.close()
-            logger.info("Base de données PostgreSQL initialisée avec succès")
-            
-        except Exception as e:
-            logger.error(f"Erreur lors de l'initialisation de la base de données: {e}")
-            
-    def get_api_key(self, provider):
-        """Récupère la clé API de l'environnement ou de la DB."""
-        # Prioriser la variable d'environnement pour Gemini (plus fiable)
-        if provider.lower() == 'gemini':
-            return os.environ.get('GEMINI_API_KEY')
-        
-        # Logique simplifiée pour les autres clés
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT api_key FROM api_keys WHERE provider = %s AND is_active = TRUE", (provider.lower(),))
-            key = cursor.fetchone()
-            conn.close()
-            return key[0] if key else None
-        except Exception as e:
-            logger.error(f"Erreur lors de la récupération de la clé {provider}: {e}")
-            return None
-            
-    # NOTE: Les autres méthodes de APIManager (save_api_key, etc.) doivent être converties 
-    # pour utiliser la connexion PostgreSQL. Je laisse l'implémentation de get_api_key 
-    # et init_database car elles sont essentielles.
-
-
-# --- Initialisation des Agents ---
-
-AGENT_PROMPTS = {
-    'kai': "Vous êtes Kai, un assistant amical et généraliste. Votre objectif est de fournir des informations précises et utiles. Ne faites pas d'appels d'outils sauf si c'est absolument nécessaire et explicite dans la demande.",
-    'alex': "Vous êtes Alex, l'agent de productivité et de communication. Votre rôle est d'utiliser les outils pour planifier des e-mails, vérifier les e-mails entrants, et gérer le calendrier. Répondez toujours de manière concise pour confirmer l'action de l'outil."
-}
-
-api_manager = APIManager()
+# --- Définition des Agents ---
 agents = {
-    'kai': AIAgent('Kai', AGENT_PROMPTS['kai']),
-    'alex': AIAgent('Alex', AGENT_PROMPTS['alex'])
+    'kai': Agent(
+        name='Kai (Generaliste)',
+        system_prompt="Tu es Kai, un assistant IA généraliste. Réponds aux questions de manière concise et amicale. N'utilise aucun outil pour l'instant."
+    ),
+    # Vous pouvez ajouter d'autres agents ici si nécessaire.
 }
+
 
 # --- Routes Flask ---
 
@@ -272,17 +232,63 @@ agents = {
 def home():
     """Page d'accueil."""
     api_key_status = api_manager.get_api_key('gemini') is not None
+    # Nécessite un fichier 'templates/index.html'
     return render_template('index.html', api_key_status=api_key_status)
 
-@app.route('/api/status', methods=['GET'])
-def get_api_status():
-    """Retourne le statut de l'API Gemini (basé sur la clé dans l'environnement)."""
+@app.route('/settings')
+def settings():
+    """Page de gestion des clés API."""
     try:
-        status = api_manager.get_api_key('gemini') is not None
-        return jsonify({'success': True, 'api_working': status, 'provider': 'Gemini'})
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            # Récupère toutes les clés (pour affichage)
+            cursor.execute("SELECT provider, is_active, last_tested, test_status, created_at FROM api_keys ORDER BY provider")
+            api_keys = cursor.fetchall()
+            
+            # Mettre en forme les données pour le template
+            keys_data = []
+            for provider, is_active, last_tested, test_status, created_at in api_keys:
+                keys_data.append({
+                    'provider': provider.upper(),
+                    'is_active': 'Oui' if is_active else 'Non',
+                    'last_tested': last_tested.strftime('%Y-%m-%d %H:%M:%S') if last_tested else 'N/A',
+                    'test_status': test_status
+                })
+                
+            # Nécessite un fichier 'templates/settings.html'
+            return render_template('settings.html', keys=keys_data)
     except Exception as e:
-        logger.error(f"Erreur statut APIs: {e}")
-        return jsonify({'success': False, 'message': str(e)})
+        logger.error(f"Erreur lors de l'affichage des paramètres: {e}")
+        return render_template('settings.html', error=f"Erreur DB: {str(e)}. Vérifiez DATABASE_URL.", keys=[])
+
+@app.route('/api/save_key', methods=['POST'])
+def save_api_key_endpoint():
+    """Endpoint pour enregistrer une clé API."""
+    data = request.get_json()
+    provider = data.get('provider')
+    api_key = data.get('api_key')
+    
+    if not provider or not api_key:
+        return jsonify({'success': False, 'message': 'Provider et Clé API requis.'}), 400
+
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            # Utiliser ON CONFLICT DO UPDATE pour PostgreSQL (UPSERT)
+            cursor.execute(
+                """
+                INSERT INTO api_keys (provider, api_key, is_active, last_tested, test_status)
+                VALUES (%s, %s, TRUE, NOW(), 'untested')
+                ON CONFLICT (provider) DO UPDATE
+                SET api_key = EXCLUDED.api_key, is_active = TRUE, last_tested = NOW(), test_status = 'untested';
+                """,
+                (provider.lower(), api_key)
+            )
+            conn.commit()
+            return jsonify({'success': True, 'message': f'Clé {provider.upper()} enregistrée avec succès.'})
+    except Exception as e:
+        logger.error(f"Erreur lors de l'enregistrement de la clé: {e}")
+        return jsonify({'success': False, 'message': f'Erreur DB: {str(e)}. Vérifiez DATABASE_URL.'}), 500
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -293,7 +299,7 @@ def chat():
         agent_name = data.get('agent', 'kai').lower()
         
         if not message:
-            return jsonify({'success': False, 'message': 'Message vide'})
+            return jsonify({'success': False, 'message': 'Message vide'}), 400
         
         if agent_name not in agents:
             agent_name = 'kai'
@@ -302,23 +308,30 @@ def chat():
         response_data = agent.generate_response(message)
         
         return jsonify({
-            'success': True,
+            'success': response_data['success'],
             'agent': response_data['agent'],
             'response': response_data['response'],
             'provider': response_data['provider'],
-            'api_working': response_data['success']
+            'api_working': response_data['api_working']
         })
         
     except Exception as e:
         logger.error(f"Erreur chat: {e}")
         return jsonify({
             'success': False, 
-            'message': f'Erreur lors du traitement: {str(e)}'
-        })
+            'message': f"Erreur lors du traitement: {str(e)}"
+        }), 500
 
+# --- Démarrage ---
 
-# --- Démarrage (Retiré pour Gunicorn) ---
+# Exécution initiale pour l'initialisation de la DB
+try:
+    api_manager.init_database()
+except Exception as e:
+    logger.warning(f"L'initialisation de la DB a échoué: {e}")
 
-# Le bloc if __name__ == '__main__': a été supprimé pour permettre à Gunicorn
-# de démarrer l'application. La seule chose nécessaire est que la DB soit initialisée
-# lorsque l'application est chargée. C'est fait dans api_manager = APIManager().
+if __name__ == '__main__':
+    logger.info("Démarrage de WaveAI...")
+    # NOTE: Pour le développement local uniquement
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
