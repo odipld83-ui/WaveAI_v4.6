@@ -28,6 +28,7 @@
             justify-content: space-between;
             align-items: center;
             border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            z-index: 10;
         }
 
         .logo {
@@ -86,6 +87,7 @@
             padding: 1.5rem;
             box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
             height: fit-content;
+            flex-shrink: 0;
         }
 
         .agents-title {
@@ -163,6 +165,7 @@
             color: white;
             padding: 1.5rem;
             text-align: center;
+            flex-shrink: 0;
         }
 
         .current-agent {
@@ -193,7 +196,8 @@
             flex: 1;
             padding: 2rem;
             overflow-y: auto;
-            max-height: 500px;
+            /* Hauteur maximale pour le bureau */
+            max-height: 500px; 
         }
 
         .message {
@@ -245,16 +249,18 @@
             margin-top: 0.5rem;
         }
 
+        /* 💡 MODIFICATION CLÉ UX MOBILE: Le conteneur d'entrée doit être fixe */
         .chat-input-container {
-            padding: 1.5rem;
+            padding: 0.75rem 1.5rem; /* Réduit le padding */
             background: white;
             border-top: 1px solid #e9ecef;
+            flex-shrink: 0;
         }
 
         .input-group {
             display: flex;
-            gap: 1rem;
-            align-items: end;
+            gap: 0.5rem; /* Réduit le gap */
+            align-items: flex-end; /* Assure que le textarea est aligné en bas */
         }
 
         .input-wrapper {
@@ -264,14 +270,14 @@
 
         #messageInput {
             width: 100%;
-            padding: 1rem 1.5rem;
+            padding: 0.75rem 1rem; /* Réduit le padding du textarea */
             border: 2px solid #e9ecef;
             border-radius: 25px;
             font-size: 1rem;
             outline: none;
             transition: all 0.3s ease;
             resize: none;
-            min-height: 50px;
+            min-height: 45px; /* Réduit la hauteur minimale */
             max-height: 120px;
         }
 
@@ -286,8 +292,8 @@
         }
 
         .control-btn {
-            width: 50px;
-            height: 50px;
+            width: 45px; /* Taille légèrement réduite */
+            height: 45px; /* Taille légèrement réduite */
             border: none;
             border-radius: 50%;
             background: linear-gradient(135deg, #667eea, #764ba2);
@@ -298,6 +304,7 @@
             justify-content: center;
             transition: all 0.3s ease;
             font-size: 1.2rem;
+            flex-shrink: 0;
         }
 
         .control-btn:hover {
@@ -373,19 +380,60 @@
             position: absolute;
             left: -9999px;
         }
-
+        
+        .hidden {
+            display: none !important;
+        }
+        
+        /* ======================================= */
+        /* 💡 MÉDIA QUERIES POUR MOBILE (WhatsApp style) */
+        /* ======================================= */
         @media (max-width: 768px) {
+            body {
+                /* Permet à l'application de prendre tout l'écran verticalement */
+                min-height: 100vh;
+            }
+
             .main-container {
                 flex-direction: column;
-                padding: 0 1rem;
-                gap: 1rem;
+                padding: 0;
+                gap: 0;
+                margin: 0;
+                flex: 1;
+                /* Le conteneur principal prend tout l'espace restant sous le header */
+                height: calc(100vh - 67px); 
+                max-width: 100%;
+            }
+
+            .chat-panel {
+                /* Prend toute la largeur et la hauteur restante */
+                width: 100%;
+                border-radius: 0;
+                box-shadow: none;
+                flex: 1; 
+                overflow: hidden;
+            }
+            
+            .chat-messages {
+                padding: 1rem;
+                flex: 1;
+                /* La hauteur est maintenant calculée par le flexbox */
+                max-height: unset; 
+                overflow-y: auto;
             }
 
             .agents-panel {
+                /* Le panneau d'agents devient une barre de défilement horizontale en haut */
                 width: 100%;
                 display: flex;
                 overflow-x: auto;
-                padding: 1rem;
+                padding: 0.5rem 1rem;
+                border-radius: 0;
+                background: white;
+                box-shadow: 0 5px 10px rgba(0, 0, 0, 0.05);
+                margin: 0;
+                flex-wrap: nowrap;
+                order: 1; /* Place la barre d'agents après le header mais avant le chat */
             }
 
             .agents-title {
@@ -393,13 +441,31 @@
             }
 
             .agent-card {
-                min-width: 120px;
-                margin-right: 1rem;
+                min-width: 100px; /* Assure la visibilité sur mobile */
+                margin-right: 0.5rem;
                 margin-bottom: 0;
+                flex-shrink: 0;
+                padding: 0.75rem;
             }
 
+            .agent-name, .agent-role {
+                font-size: 0.7rem;
+            }
+            
+            /* 💡 Le chat-input-container devient fixe en bas */
+            .chat-input-container {
+                position: sticky;
+                bottom: 0;
+                width: 100%;
+                z-index: 10;
+                padding: 0.75rem 0.5rem;
+                box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.1);
+                order: 3; /* Le met en bas du flexbox */
+            }
+            
             .header {
                 padding: 1rem;
+                order: 0;
             }
 
             .header-controls {
@@ -410,10 +476,11 @@
                 padding: 0.4rem 0.8rem;
                 font-size: 0.8rem;
             }
-        }
-
-        .hidden {
-            display: none !important;
+            
+            .message-content {
+                /* Les bulles de chat sont plus larges sur petit écran */
+                max-width: 85%;
+            }
         }
     </style>
 </head>
@@ -522,7 +589,7 @@
         let currentAgent = 'kai';
         let isRecording = false;
         let recognition = null;
-        // 💡 AJOUT CLÉ 1: Variable pour stocker l'historique de la conversation (format API Gemini)
+        // 💡 CLÉ: Variable pour stocker l'historique de la conversation (format API Gemini)
         let conversationHistory = []; 
 
         // Configuration des agents
@@ -616,7 +683,7 @@
         function selectAgent(agentName) {
             currentAgent = agentName;
             
-            // 💡 MODIFICATION CLÉ 2: Réinitialiser l'historique lors du changement d'agent
+            // 💡 CRITIQUE: Réinitialiser l'historique lors du changement d'agent
             conversationHistory = [];
 
             // Mettre à jour l'interface
@@ -657,7 +724,7 @@
                     body: JSON.stringify({
                         message: message,
                         agent: currentAgent,
-                        // 💡 MODIFICATION CLÉ 3: Inclure l'historique de la conversation
+                        // 💡 CRITIQUE: Inclure l'historique de la conversation
                         history: conversationHistory 
                     })
                 });
@@ -672,8 +739,7 @@
                     addMessage('agent', data.agent, data.response);
                     updateAPIStatus(data.api_working, data.provider);
                     
-                    // 💡 MODIFICATION CLÉ 4: Mettre à jour l'historique local avec celui du backend
-                    // Le backend renvoie l'historique complet pour la prochaine requête
+                    // 💡 CRITIQUE: Mettre à jour l'historique local avec celui du backend
                     conversationHistory = data.history || []; 
 
                 } else {
