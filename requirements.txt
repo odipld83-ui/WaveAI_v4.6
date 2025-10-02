@@ -1,9 +1,9 @@
-Flask==3.0.0
-openai==1.12.0
-anthropic==0.18.1
-requests==2.31.0
-gunicorn==21.2.0
-python-dotenv==1.0.0
+Flask
+requests
+gunicorn
+# Dépendances pour PostgreSQL (Base de données stable et partagée)
+psycopg2-binary
+# Dépendances pour les API Google (Gmail, Gemini Auth)
 google-api-python-client
-google-auth-httplib2
 google-auth-oauthlib
+google-auth-httplib2
