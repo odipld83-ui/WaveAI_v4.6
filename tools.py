@@ -1,281 +1,260 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TOOLS.PY - Fonctions externes utilisées par les agents Gemini
-Version: Gmail API OAuth 2.0 (Réel)
+tools.py - Fichier de déclaration des fonctions (Function Calling) pour les agents WaveAI.
+
+Contient la logique métier (base de données, Gmail, etc.) qui peut être appelée par l'agent Gemini.
 """
 
 import os
-import sqlite3
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 import base64
 from email.mime.text import MIMEText
+from typing import List, Dict, Any, Union
 
-# Librairies Google API
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+# **IMPORTS GMAIL CRITIQUES**
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+except ImportError:
+    # Ce bloc sera exécuté si les bibliothèques Google sont manquantes
+    print("ATTENTION: Les bibliothèques Google (google-auth-oauthlib, google-api-python-client) ne sont pas installées. Les outils Gmail ne fonctionneront pas.")
+    # Définir des valeurs par défaut pour éviter les plantages
+    Credentials = None
+    build = lambda *args, **kwargs: None
+    HttpError = Exception
 
-# Configuration du logging
+
+# -- Configuration et Logging --
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Configuration Gmail API ---
+# Si vous utilisez un client ID/Secret pour l'authentification (ce qui est recommandé pour OAuth)
+CLIENT_SECRET_FILE = 'client_secret.json'
 TOKEN_FILE = 'token_gmail.json'
-# On utilise les scopes de Gmail pour la portabilité
-GMAIL_SCOPES = [
-    'https://www.googleapis.com/auth/gmail.modify',
-    'https://www.googleapis.com/auth/gmail.send',
-    'https://www.googleapis.com/auth/gmail.readonly'
-]
+SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
-# --- Fonction Utilitaires pour Gmail ---
+# -- Base de données (PostgreSQL) - Similaire à app.py --
+import psycopg2
+from urllib.parse import urlparse
 
-def get_gmail_service():
-    """
-    Charge le jeton d'accès depuis token_gmail.json et rafraîchit
-    le jeton si nécessaire, puis retourne l'objet de service Gmail API.
-    """
+DATABASE_URL = os.environ.get('DATABASE_URL')
+
+def get_db_connection():
+    """Crée et retourne une connexion à la base de données PostgreSQL."""
+    if not DATABASE_URL:
+        # Dans un contexte tools.py, on peut juste retourner None si l'app.py gère le fallback
+        raise Exception("DATABASE_URL non défini dans tools.py.")
+    
+    result = urlparse(DATABASE_URL)
+    conn = psycopg2.connect(
+        database=result.path[1:],
+        user=result.username,
+        password=result.password,
+        host=result.hostname,
+        port=result.port
+    )
+    return conn
+
+# -- GESTION DE L'AUTHENTIFICATION GMAIL --
+
+def load_gmail_credentials() -> Union[Credentials, None]:
+    """Charge les identifiants depuis token_gmail.json, ou démarre le flux OAuth si nécessaire."""
     creds = None
     
-    if not os.path.exists(TOKEN_FILE):
-        logger.error(f"Fichier de jeton manquant: {TOKEN_FILE}")
-        return None
-
-    try:
-        # Charge les identifiants depuis le fichier token_gmail.json
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, GMAIL_SCOPES)
-        
-        # Le jeton d'accès (token) peut être nul dans notre fichier, 
-        # mais le refresh_token est présent.
-        # On force le rafraîchissement si le jeton n'est pas encore valide ou a expiré.
-        if not creds.valid or not creds.token:
-            if creds.refresh_token:
-                logger.info("Rafraîchissement du jeton d'accès Gmail...")
-                creds.refresh(Request())
-            else:
-                logger.error("Jeton de rafraîchissement (refresh_token) manquant ou invalide.")
-                return None
-        
-        # Sauvegarde le jeton d'accès (token) rafraîchi dans le fichier pour les prochaines exécutions
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
-            
-        # Construit et retourne l'objet de service
-        service = build('gmail', 'v1', credentials=creds)
-        return service
-        
-    except Exception as e:
-        logger.error(f"Erreur lors de la construction du service Gmail: {e}")
-        return None
-
-def create_message(sender, to, subject, message_text):
-    """Crée le corps de l'e-mail au format MIME."""
-    message = MIMEText(message_text)
-    message['to'] = to
-    message['from'] = sender
-    message['subject'] = subject
-    
-    # Encodage en Base64 URL Safe, requis par l'API Gmail
-    return {'raw': base64.urlsafe_b64encode(message.as_bytes()).decode()}
-
-# --- Outils Utilisés par les Agents ---
-
-def add_calendar_event(title: str, date_str: str, duration_hours: float, notes: str) -> str:
-    """
-    Ajoute un événement au calendrier Google. Utile pour planifier des réunions, rappels ou tâches.
-    :param title: Titre de l'événement (ex: "Réunion client").
-    :param date_str: Date et heure de début au format YYYY-MM-DD HH:MM (ex: "2024-10-25 14:30").
-    :param duration_hours: Durée de l'événement en heures (ex: 1.5).
-    :param notes: Description ou notes de l'événement.
-    :return: Confirmation de la planification ou message d'erreur.
-    """
-    # NOTE: L'implémentation de l'API Google Calendar n'est pas encore faite,
-    # c'est pour l'instant une simulation.
-    try:
-        start_datetime = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
-        end_datetime = start_datetime + timedelta(hours=duration_hours)
-        
-        return f"Événement de calendrier SIMULÉ planifié ! Titre: {title}, de {start_datetime.strftime('%Y-%m-%d %H:%M')} à {end_datetime.strftime('%Y-%m-%d %H:%M')} (Durée: {duration_hours}h). Note: {notes}. REMARQUE: Nécessite l'intégration Google Calendar API."
-    except ValueError:
-        return f"Erreur de format de date. Utilisez le format YYYY-MM-DD HH:MM pour la date de début."
-
-
-def check_priority_mail(query: str) -> str:
-    """
-    Vérifie les e-mails récents (dans la boîte de réception) qui correspondent à un critère de recherche spécifique.
-    Utiliser des mots-clés pertinents (ex: 'urgent', 'facture', 'client A').
-    :param query: Requête de recherche Gmail (ex: 'is:unread subject:urgent').
-    :return: Un résumé du nombre d'e-mails trouvés ou un extrait.
-    """
-    service = get_gmail_service()
-    if not service:
-        return "Erreur d'authentification: Le service Gmail n'est pas disponible. Vérifiez le fichier token_gmail.json."
-
-    try:
-        # Recherche des messages
-        # On utilise 'maxResults=5' pour ne pas surcharger l'API
-        response = service.users().messages().list(userId='me', q=query, maxResults=5).execute()
-        messages = response.get('messages', [])
-        
-        if not messages:
-            return f"Aucun e-mail trouvé pour la requête '{query}'."
-
-        count = len(messages)
-        first_subject = ""
-        
-        # Récupère le sujet du premier message pour donner un aperçu
-        first_message_id = messages[0]['id']
-        first_message_data = service.users().messages().get(userId='me', id=first_message_id, format='metadata', metadataHeaders=['Subject']).execute()
-        
-        headers = first_message_data.get('payload', {}).get('headers', [])
-        for header in headers:
-            if header['name'] == 'Subject':
-                first_subject = header['value']
-                break
-
-        return f"J'ai trouvé {count} e-mails correspondant à la requête '{query}'. Le sujet du plus récent est: '{first_subject}'."
-        
-    except Exception as e:
-        logger.error(f"Erreur lors de la vérification des mails: {e}")
-        return f"Une erreur technique est survenue lors de la vérification des e-mails: {str(e)}"
-
-
-def schedule_email_alert(recipient: str, subject: str, body: str, scheduled_date_str: str) -> str:
-    """
-    Planifie l'envoi d'un e-mail à une date future. Si la date est passée ou immédiate, l'e-mail est envoyé immédiatement via Gmail API.
-    :param recipient: Adresse e-mail du destinataire (ex: 'client@exemple.com').
-    :param subject: Sujet de l'e-mail (ex: 'Rappel de renouvellement de licence').
-    :param body: Corps du message (ex: 'Votre licence expire le...').
-    :param scheduled_date_str: Date et heure d'envoi de l'e-mail au format YYYY-MM-DD HH:MM.
-    :return: Confirmation de la planification ou de l'envoi.
-    """
-    try:
-        scheduled_date = datetime.strptime(scheduled_date_str, "%Y-%m-%d %H:%M")
-    except ValueError:
-        return f"Erreur de format de date. Utilisez le format YYYY-MM-DD HH:MM pour la date d'envoi planifiée."
-    
-    # On considère immédiat si l'heure planifiée est dans le passé ou dans les 2 minutes
-    if scheduled_date < (datetime.now() + timedelta(minutes=2)):
-        
-        service = get_gmail_service()
-        if not service:
-            return "Erreur d'authentification: Le service Gmail n'est pas disponible pour l'envoi immédiat. Vérifiez le fichier token_gmail.json."
-
+    # Le fichier token_gmail.json stocke les jetons d'accès et de rafraîchissement de l'utilisateur.
+    if os.path.exists(TOKEN_FILE):
         try:
-            # Récupérer l'adresse de l'utilisateur connecté (le 'sender')
-            profile = service.users().getProfile(userId='me').execute()
-            sender_email = profile['emailAddress']
-            
-            # Créer et envoyer le message
-            message = create_message(sender_email, recipient, subject, body)
-            service.users().messages().send(userId='me', body=message).execute()
-            
-            logger.info(f"E-mail immédiat envoyé à {recipient} (Sujet: {subject})")
-            return f"E-mail envoyé IMMÉDIATEMENT à {recipient} (Sujet: {subject}) via l'API Gmail depuis {sender_email}."
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement des jetons depuis {TOKEN_FILE}: {e}")
+            creds = None
+
+    # Si les identifiants existent mais sont invalides ou expirés, et qu'il y a un jeton de rafraîchissement
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            # Sauvegarde des jetons rafraîchis pour le prochain démarrage
+            with open(TOKEN_FILE, 'w') as token:
+                token.write(creds.to_json())
+            logger.info("Jetons Gmail rafraîchis et sauvegardés.")
             
         except Exception as e:
-            logger.error(f"Échec de l'envoi immédiat de l'e-mail via Gmail API: {e}")
-            return f"Échec de l'envoi immédiat via l'API Gmail : {str(e)}. Vérifiez le statut de l'API."
+            logger.error(f"Échec du rafraîchissement des jetons Gmail. L'utilisateur doit se réauthentifier. Erreur: {e}")
+            return None # Échec du rafraîchissement
+            
+    # Si les identifiants sont manquants ou invalides et qu'ils ne peuvent pas être rafraîchis
+    if not creds or not creds.valid:
+        logger.warning("Jeton Gmail invalide ou manquant. L'envoi d'e-mail échouera.")
+        # Dans un environnement de serveur, on ne peut pas démarrer le flux d'authentification ici.
+        # L'application doit avoir une route /auth/gmail pour gérer cela.
+        return None 
 
-    else:
-        # Stockage dans la base de données pour envoi différé (au prochain démarrage)
-        try:
-            # NOTE: L'implémentation de la DB ici utilise SQLite (waveai.db) comme un fallback. 
-            # Si vous utilisez PostgreSQL (comme dans app.py), ceci pourrait être ignoré 
-            # ou nécessiterait une adaptation pour utiliser le connecteur psycopg2.
-            # Cependant, nous laissons le code tel quel pour conserver la structure d'origine.
-            conn = sqlite3.connect('waveai.db')
+    return creds
+
+def create_message_base64(to, subject, message_text):
+    """Crée un message MIME et l'encode en base64 pour l'API Gmail."""
+    message = MIMEText(message_text, 'html')
+    # Gmail API utilise 'me' comme expéditeur (l'utilisateur authentifié)
+    message['to'] = to 
+    message['subject'] = subject
+    # L'API Gmail attend un message RFC 2822
+    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    return {'raw': raw_message}
+
+
+# -- DÉCLARATION DES FONCTIONS D'OUTILS --
+
+def schedule_email_alert(recipient_email: str, subject: str, body: str, scheduled_date_str: str) -> str:
+    """
+    Planifie l'envoi d'un e-mail à une date et heure spécifique.
+    
+    Args:
+        recipient_email (str): L'adresse e-mail du destinataire.
+        subject (str): Le sujet de l'e-mail.
+        body (str): Le corps de l'e-mail (peut contenir du HTML simple).
+        scheduled_date_str (str): La date et l'heure de l'envoi (Format: YYYY-MM-DD HH:MM).
+        
+    Returns:
+        str: Un message confirmant la planification ou une erreur.
+    """
+    try:
+        # Convertir la chaîne de date en objet datetime
+        scheduled_date = datetime.strptime(scheduled_date_str, '%Y-%m-%d %H:%M')
+        
+        # ⚠️ Vérification : Si l'envoi est immédiat ou pour une date dans le futur proche (< 5 min), l'envoyer immédiatement
+        # Note : Dans cette architecture simple, nous planifions tout en DB ou envoyons immédiatement si 'maintenant'
+        if scheduled_date < datetime.now() + timezone.timedelta(minutes=5):
+            return send_email_immediate(recipient_email, subject, body)
+        
+        # 1. Connexion à la DB
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             
-            # Assurer que la table existe
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS scheduled_tasks (
-                    id INTEGER PRIMARY KEY,
-                    task_type TEXT NOT NULL,
-                    recipient TEXT NOT NULL,
-                    subject TEXT NOT NULL,
-                    body TEXT NOT NULL,
-                    scheduled_date TIMESTAMP NOT NULL,
-                    status TEXT DEFAULT 'pending'
-                )
-            ''')
-
-            cursor.execute('''
-                INSERT INTO scheduled_tasks (task_type, recipient, subject, body, scheduled_date)
-                VALUES (?, ?, ?, ?, ?)
-            ''', ('email_alert', recipient, subject, body, scheduled_date.isoformat()))
-            
+            # 2. Insertion dans la table des tâches
+            cursor.execute(
+                """
+                INSERT INTO scheduled_tasks (task_type, recipient, subject, body, scheduled_date, status)
+                VALUES (%s, %s, %s, %s, %s, 'pending')
+                RETURNING id;
+                """,
+                ('email', recipient_email, subject, body, scheduled_date)
+            )
+            task_id = cursor.fetchone()[0]
             conn.commit()
-            conn.close()
             
-            logger.info(f"Tâche e-mail planifiée pour {scheduled_date_str}")
-            return f"La tâche d'envoi d'e-mail à {recipient} (Sujet: {subject}) a été planifiée pour le {scheduled_date_str} et sera envoyée au prochain cycle de vérification du serveur. Le processus de planification est réussi."
-            
-        except Exception as e:
-            logger.error(f"Erreur lors de la planification de la tâche dans la DB: {e}")
-            return f"Une erreur s'est produite lors de l'enregistrement de la tâche planifiée : {str(e)}"
+            # 3. Confirmation
+            return f"L'e-mail a été planifié avec succès pour le {scheduled_date_str} (UTC). Identifiant de la tâche : {task_id}"
+
+    except ValueError:
+        # Erreur de format de date
+        return f"Erreur: Le format de la date doit être 'YYYY-MM-DD HH:MM'. Vous avez fourni : {scheduled_date_str}"
+    except Exception as e:
+        logger.error(f"Erreur DB lors de la planification de l'e-mail: {e}")
+        return "Erreur interne: Impossible d'enregistrer la tâche dans la base de données. Veuillez vérifier la connexion DB."
 
 
-AVAILABLE_TOOLS = {
-    'add_calendar_event': add_calendar_event,
-    'check_priority_mail': check_priority_mail,
-    'schedule_email_alert': schedule_email_alert
-}
+def send_email_immediate(recipient: str, subject: str, body: str) -> str:
+    """
+    ENVOI CRITIQUE : Tente d'envoyer l'e-mail immédiatement via l'API Gmail.
 
-# --- NOUVELLE FONCTION CRITIQUE POUR LE FUNCTION CALLING ---
+    Args:
+        recipient (str): Adresse e-mail du destinataire.
+        subject (str): Sujet de l'e-mail.
+        body (str): Corps de l'e-mail.
+
+    Returns:
+        str: Message de succès ou d'erreur détaillé pour le débogage.
+    """
+    creds = load_gmail_credentials()
+    
+    if not creds:
+        # Le chargement des jetons a échoué (Jeton manquant/expiré/non rafraîchi)
+        return "Échec de l'envoi: Les jetons d'authentification Gmail sont invalides ou manquants. L'utilisateur doit se réauthentifier via la console (fichier token_gmail.json)."
+
+    try:
+        service = build('gmail', 'v1', credentials=creds)
+        message = create_message_base64(recipient, subject, body)
+
+        # Envoi de l'e-mail
+        service.users().messages().send(userId='me', body=message).execute()
+
+        logger.info(f"E-mail envoyé immédiatement à {recipient}. Sujet: {subject}")
+        return "L'e-mail a été envoyé avec succès immédiatement."
+        
+    except HttpError as e:
+        # ⚠️ GESTION SPÉCIFIQUE DES ERREURS API GMAIL
+        error_details = json.loads(e.content.decode())
+        error_message = error_details.get('error', {}).get('message', 'Erreur HTTP inconnue de l\'API Gmail.')
+        
+        logger.error(f"Échec de l'envoi immédiat de l'e-mail (Gmail API): {error_message}")
+        return f"Échec de l'envoi: Erreur de l'API Gmail (Code {e.resp.status}): {error_message}. Vérifiez le destinataire et le statut de votre jeton Gmail."
+
+    except Exception as e:
+        # ⚠️ GESTION DES ERREURS GÉNÉRALES (Connexion, etc.)
+        logger.error(f"Échec de l'envoi immédiat de l'e-mail. Erreur non gérée: {e}")
+        return f"Échec de l'envoi: Erreur inattendue ({type(e).__name__}): {str(e)}. Vérifiez les logs."
+
+# -- DÉCLARATION DU CONTRAT API POUR GEMINI --
 
 def get_tool_specs():
-    """
-    Retourne les spécifications des outils disponibles dans un format 
-    lisible par l'API Gemini (Function Calling).
-    """
-    specs = []
+    """Retourne les spécifications de fonctions au format Google pour le Function Calling."""
     
-    # 1. Spécification pour schedule_email_alert
-    specs.append({
-        "name": "schedule_email_alert",
-        "description": "Planifie l'envoi d'un e-mail à une date et heure précise. Si la date est passée ou immédiate, l'e-mail est envoyé immédiatement via Gmail API.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "recipient": {"type": "STRING", "description": "L'adresse e-mail du destinataire (ex: 'client@exemple.com')."},
-                "subject": {"type": "STRING", "description": "Le sujet de l'e-mail."},
-                "body": {"type": "STRING", "description": "Le corps du message."},
-                "scheduled_date_str": {"type": "STRING", "description": "La date et l'heure d'envoi au format YYYY-MM-DD HH:MM (ex: '2025-10-10 14:00')."}
-            },
-            "required": ["recipient", "subject", "body", "scheduled_date_str"]
+    # Le rôle des autres outils est gardé abstrait car ils n'ont pas été modifiés.
+    # Seul schedule_email_alert est détaillé ici.
+
+    return [
+        {
+            "name": "schedule_email_alert",
+            "description": "Planifie l'envoi d'un e-mail via Gmail à une date et heure précise (ou immédiatement si l'heure est 'maintenant'). L'agent doit fournir la date et l'heure au format YYYY-MM-DD HH:MM.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "recipient_email": {
+                        "type": "string",
+                        "description": "L'adresse e-mail complète du destinataire. Ex: 'jean.dupont@societe.com'"
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Le sujet de l'e-mail."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Le corps de l'e-mail. Doit être complet et professionnel."
+                    },
+                    "scheduled_date_str": {
+                        "type": "string",
+                        "description": "La date et l'heure de l'envoi. Format requis: YYYY-MM-DD HH:MM (ex: 2025-12-31 10:30). L'agent doit utiliser l'heure actuelle du système fournie dans son prompt si l'utilisateur demande d'envoyer 'maintenant'."
+                    }
+                },
+                "required": ["recipient_email", "subject", "body", "scheduled_date_str"]
+            }
+        },
+        # TODO: Ajoutez ici les spécifications de vos autres outils (LinkedIn, Calendrier, etc.)
+        # Exemple d'un outil fictif
+        {
+            "name": "find_linkedin_contact",
+            "description": "Recherche et retourne un contact sur LinkedIn basé sur un nom et un rôle (outil de Lina).",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "name": {"type": "string", "description": "Nom complet du contact à rechercher."},
+                    "role": {"type": "string", "description": "Rôle ou entreprise pour affiner la recherche."},
+                },
+                "required": ["name"]
+            }
         }
-    })
-    
-    # 2. Spécification pour check_priority_mail
-    specs.append({
-        "name": "check_priority_mail",
-        "description": "Vérifie les e-mails récents (boîte de réception) qui correspondent à un critère de recherche Gmail spécifique (ex: 'is:unread subject:urgent').",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "query": {"type": "STRING", "description": "Requête de recherche Gmail (ex: 'is:unread subject:urgent')."}
-            },
-            "required": ["query"]
-        }
-    })
-    
-    # 3. Spécification pour add_calendar_event (actuellement une simulation)
-    specs.append({
-        "name": "add_calendar_event",
-        "description": "Ajoute un événement au calendrier. Utile pour planifier des réunions, rappels ou tâches (actuellement une simulation).",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "title": {"type": "STRING", "description": "Titre de l'événement (ex: 'Réunion client')."},
-                "date_str": {"type": "STRING", "description": "Date et heure de début au format YYYY-MM-DD HH:MM (ex: '2024-10-25 14:30')."},
-                "duration_hours": {"type": "NUMBER", "description": "Durée de l'événement en heures (ex: 1.5)."},
-                "notes": {"type": "STRING", "description": "Description ou notes de l'événement."}
-            },
-            "required": ["title", "date_str", "duration_hours", "notes"]
-        }
-    })
-    
-    return specs
+    ]
+
+# -- MAPPAGE DES OUTILS --
+AVAILABLE_TOOLS = {
+    "schedule_email_alert": schedule_email_alert,
+    # Exemple d'un outil fictif
+    # La fonction réelle doit exister
+    "find_linkedin_contact": lambda name, role="": f"Recherche LinkedIn pour {name} ({role}) en cours..." 
+}
