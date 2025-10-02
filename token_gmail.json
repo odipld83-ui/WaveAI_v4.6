@@ -1,0 +1,13 @@
+{
+    "token": null,
+    "refresh_token": "1//04ovCGn5MVBFBCgYIARAAGAQSNwF-L9Irvz9jARyBz371FvFNMi8WfLZKXprBZ6VJl930QwP24vK1czpOb-QgHmJV-VKst5UgG7Y",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "client_id": "VOTRE-CLIENT-ID.apps.googleusercontent.com",
+    "client_secret": "VOTRE-CLIENT-SECRET",
+    "scopes": [
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.readonly"
+    ],
+    "expiry": null
+}
