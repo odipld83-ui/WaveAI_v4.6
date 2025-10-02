@@ -12,15 +12,10 @@
             box-sizing: border-box;
         }
 
-        /* CORRECTION CRITIQUE 1: Forcer HTML et BODY à 100% de la hauteur */
-        html, body {
-            height: 100%; /* Important pour la structure mobile */
-            overflow: hidden; /* Empêche tout défilement indésirable de la page */
-        }
-        
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
             display: flex;
             flex-direction: column;
         }
@@ -34,7 +29,6 @@
             align-items: center;
             border-bottom: 1px solid rgba(255, 255, 255, 0.2);
             z-index: 10;
-            flex-shrink: 0; /* Ne doit jamais rétrécir */
         }
 
         .logo {
@@ -202,7 +196,8 @@
             flex: 1;
             padding: 2rem;
             overflow-y: auto;
-            max-height: 500px; /* Seulement pour le bureau */
+            /* Hauteur maximale pour le bureau */
+            max-height: 500px; 
         }
 
         .message {
@@ -265,7 +260,7 @@
         .input-group {
             display: flex;
             gap: 0.75rem;
-            align-items: flex-end;
+            align-items: flex-end; 
         }
 
         .input-wrapper {
@@ -311,46 +306,132 @@
             font-size: 1.2rem;
             flex-shrink: 0;
         }
-        /* [Omissis : Styles intermédiaires et animations] */
 
+        .control-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+        }
+
+        .control-btn.recording {
+            background: linear-gradient(135deg, #dc3545, #c82333);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: #667eea;
+            font-style: italic;
+        }
+
+        .typing-indicator {
+            display: inline-flex;
+            gap: 3px;
+        }
+
+        .typing-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+            animation: typing 1.4s infinite ease-in-out;
+        }
+
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+        @keyframes typing {
+            0%, 80%, 100% { transform: scale(0.8); opacity: 0.5; }
+            40% { transform: scale(1); opacity: 1; }
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 1rem;
+            border-radius: 10px;
+            margin: 1rem 0;
+            border: 1px solid #f5c6cb;
+        }
+
+        .success-message {
+            background: #d4edda;
+            color: #155724;
+            padding: 1rem;
+            border-radius: 10px;
+            margin: 1rem 0;
+            border: 1px solid #c3e6cb;
+        }
+
+        .file-upload {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+        }
+
+        .file-upload input[type=file] {
+            position: absolute;
+            left: -9999px;
+        }
+        
+        .hidden {
+            display: none !important;
+        }
+        
         /* ======================================= */
-        /* 💡 CORRECTION DU DESIGN MOBILE AGRESSIVE (WhatsApp style) */
+        /* 💡 CORRECTION DU DESIGN MOBILE (WhatsApp style) */
         /* ======================================= */
         @media (max-width: 768px) {
-            /* Nous allons utiliser la hauteur de l'écran mobile pour tout l'affichage */
             body {
-                /* Fixer la hauteur pour éviter les problèmes de barre d'adresse */
+                /* Force l'application à prendre toute la hauteur verticale */
+                min-height: 100vh;
                 height: 100vh;
-                min-height: 100vh; 
-                flex-direction: column;
                 overflow: hidden; /* Empêche le défilement général */
             }
 
             .main-container {
                 flex-direction: column;
-                padding: 0;
-                gap: 0;
+                padding: 0; 
+                gap: 0; 
                 margin: 0;
-                /* Crucial: La hauteur du main-container prend tout l'espace restant. 
-                   Le 67px est une estimation de la hauteur du header (variable). */
-                height: 100%; /* Prend toute la hauteur du body restant */
+                flex: 1;
+                /* Prend la hauteur restante sous le header */
+                height: calc(100vh - 67px); 
                 max-width: 100%;
             }
 
             .chat-panel {
+                /* Le panneau de chat prend tout l'espace restant */
                 width: 100%;
                 border-radius: 0;
                 box-shadow: none;
-                flex: 1; /* Le panneau de chat prend l'espace restant */
+                flex: 1; 
                 overflow: hidden;
                 display: flex;
                 flex-direction: column;
+                order: 2; 
             }
 
             .chat-header {
                 flex-shrink: 0;
             }
             
+            /* MODIFICATION CRITIQUE ICI: Ajout de padding-bottom pour la barre fixe */
+            .chat-messages {
+                padding: 1rem;
+                flex: 1; 
+                max-height: unset; 
+                overflow-y: auto;
+                padding-bottom: 70px; /* Espace de compensation pour la barre de saisie fixe */
+            }
+
             .agents-panel {
                 /* Devient une barre de défilement horizontale en haut */
                 width: 100%;
@@ -362,44 +443,53 @@
                 box-shadow: 0 5px 10px rgba(0, 0, 0, 0.05);
                 margin: 0;
                 flex-wrap: nowrap;
-                flex-shrink: 0; /* Ne doit pas rétrécir */
+                order: 1;
             }
 
             .agents-title {
                 display: none;
             }
-            
-            /* CORRECTION CRITIQUE 2: La zone de saisie est fixée au bas */
-            .chat-input-container {
-                /* Utilisation de 'fixed' pour garantir qu'il reste en bas de la vue */
-                position: fixed; 
-                bottom: 0;
-                width: 100%;
-                left: 0; /* S'assurer qu'il prend toute la largeur */
-                z-index: 100;
-                padding: 0.75rem 0.5rem; 
-                box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.1);
-                /* Retiré du flux flexbox du main-container grâce à position: fixed */
+
+            .agent-card {
+                min-width: 100px;
+                margin-right: 0.5rem;
+                margin-bottom: 0;
+                flex-shrink: 0;
+                padding: 0.75rem;
+            }
+
+            .agent-name, .agent-role {
+                font-size: 0.7rem;
             }
             
-            /* CORRECTION CRITIQUE 3: Le conteneur de messages doit s'adapter */
-            .chat-messages {
-                padding: 1rem;
-                flex: 1; 
-                max-height: unset; 
-                overflow-y: auto;
-                /* Ajout de padding-bottom pour compenser la barre fixe ! */
-                padding-bottom: 70px; /* Espace équivalent à la hauteur de la barre d'input fixée */
+            /* MODIFICATION CRITIQUE: Utilisation de 'fixed' pour coller la barre en bas */
+            .chat-input-container {
+                position: fixed; /* Éléments fixe à l'écran */
+                bottom: 0;
+                left: 0; /* Prend toute la largeur */
+                width: 100%;
+                z-index: 100; /* Assure qu'il est au-dessus de tout */
+                padding: 0.75rem 0.5rem; 
+                box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.1);
+                order: 3;
             }
             
             .header {
                 padding: 1rem;
+                order: 0;
             }
 
             .message-content {
                 max-width: 90%;
             }
             
+            /* Ajustement de la taille de l'input et des boutons */
+            #messageInput {
+                padding: 0.5rem 1rem;
+                min-height: 40px;
+                max-height: 100px;
+            }
+
             .control-btn {
                 width: 40px;
                 height: 40px;
@@ -427,46 +517,88 @@
 
     <div class="main-container">
         <div class="agents-panel">
+            <div class="agents-title">Choisir un Agent</div>
+            
+            <div class="agent-card active" data-agent="kai">
+                <div class="agent-avatar">🤖</div>
+                <div class="agent-name">Kai</div>
+                <div class="agent-role">Assistant général</div>
             </div>
+
+            <div class="agent-card" data-agent="alex">
+                <div class="agent-avatar">📧</div>
+                <div class="agent-name">Alex</div>
+                <div class="agent-role">Productivité Gmail</div>
+            </div>
+
+            <div class="agent-card" data-agent="lina">
+                <div class="agent-avatar">💼</div>
+                <div class="agent-name">Lina</div>
+                <div class="agent-role">Expert LinkedIn</div>
+            </div>
+
+            <div class="agent-card" data-agent="marco">
+                <div class="agent-avatar">📱</div>
+                <div class="agent-name">Marco</div>
+                <div class="agent-role">Social Media</div>
+            </div>
+
+            <div class="agent-card" data-agent="sofia">
+                <div class="agent-avatar">📅</div>
+                <div class="agent-name">Sofia</div>
+                <div class="agent-role">Calendrier</div>
+            </div>
+        </div>
 
         <div class="chat-panel">
             <div class="chat-header">
+                <div class="current-agent" id="currentAgentName">Kai</div>
+                <div class="agent-description" id="currentAgentDescription">Assistant conversationnel général</div>
+                <div class="api-status status-unknown" id="apiStatus">
+                    <i class="fas fa-question-circle"></i>
+                    Statut API: Non testé
                 </div>
+            </div>
 
             <div class="chat-messages" id="chatMessages">
+                <div class="message">
+                    <div class="message-avatar agent-message-avatar">🤖</div>
+                    <div class="message-content">
+                        <div>Bonjour ! Je suis Kai, votre assistant IA. Comment puis-je vous aider aujourd'hui ?</div>
+                        <div class="message-info">Assistant IA • À l'instant</div>
+                    </div>
                 </div>
-            
             </div>
-    </div>
-    
-    <div class="chat-input-container">
-        <div class="input-group">
-            <div class="input-wrapper">
-                <textarea 
-                    id="messageInput" 
-                    placeholder="Tapez votre message ici..."
-                    rows="1"
-                ></textarea>
-            </div>
-            <div class="input-controls">
-                <div class="file-upload">
-                    <input type="file" id="fileInput" accept=".txt,.pdf,.doc,.docx" multiple>
-                    <button class="control-btn" onclick="document.getElementById('fileInput').click()">
-                        <i class="fas fa-paperclip"></i>
-                    </button>
+
+            <div class="chat-input-container">
+                <div class="input-group">
+                    <div class="input-wrapper">
+                        <textarea 
+                            id="messageInput" 
+                            placeholder="Tapez votre message ici..."
+                            rows="1"
+                        ></textarea>
+                    </div>
+                    <div class="input-controls">
+                        <div class="file-upload">
+                            <input type="file" id="fileInput" accept=".txt,.pdf,.doc,.docx" multiple>
+                            <button class="control-btn" onclick="document.getElementById('fileInput').click()">
+                                <i class="fas fa-paperclip"></i>
+                            </button>
+                        </div>
+                        <button class="control-btn" id="voiceBtn" onclick="toggleVoiceRecording()">
+                            <i class="fas fa-microphone"></i>
+                        </button>
+                        <button class="control-btn" onclick="sendMessage()">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
                 </div>
-                <button class="control-btn" id="voiceBtn" onclick="toggleVoiceRecording()">
-                    <i class="fas fa-microphone"></i>
-                </button>
-                <button class="control-btn" onclick="sendMessage()">
-                    <i class="fas fa-paper-plane"></i>
-                </button>
             </div>
         </div>
     </div>
 
     <script>
-        /* [Code JavaScript inchangé - Utiliser le code JS de la version précédente] */
         let currentAgent = 'kai';
         let isRecording = false;
         let recognition = null;
