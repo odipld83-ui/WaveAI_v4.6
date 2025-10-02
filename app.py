@@ -204,14 +204,18 @@ class APIManager:
             if response.status_code == 200:
                 result = response.json()
                 
-                # Extraction de la réponse pour Gemini
+                # --- CORRECTION DE L'ERREUR 'parts' pour le TEST ---
                 if 'candidates' in result and result['candidates']:
-                    content = result['candidates'][0]['content']
-                    if 'parts' in content and content['parts']:
+                    candidate = result['candidates'][0]
+                    content = candidate.get('content')
+                    
+                    if content and 'parts' in content and content['parts']:
                         text = content['parts'][0].get('text', '').strip().upper()
+                        
                         if 'OK' in text or 'OK' == text:
                             self.log_test_result('gemini', 'success')
                             return True, "API Gemini fonctionnelle.", None
+                    # --- FIN DE CORRECTION ---
                 
                 # Échec du test malgré le statut 200
                 self.log_test_result('gemini', 'error')
@@ -279,15 +283,26 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
             if response.status_code == 200:
                 result = response.json()
                 
+                # --- CORRECTION DE L'ERREUR 'parts' pour l'AGENT ---
                 if 'candidates' in result and result['candidates']:
-                    generated_text = result['candidates'][0]['content']['parts'][0]['text']
+                    candidate = result['candidates'][0]
+                    content = candidate.get('content')
                     
-                    return {
-                        'agent': self.name,
-                        'response': generated_text.strip(),
-                        'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
-                        'success': True
-                    }
+                    if content and 'parts' in content and content['parts']:
+                        generated_text = content['parts'][0].get('text', '')
+                    
+                        if generated_text:
+                            return {
+                                'agent': self.name,
+                                'response': generated_text.strip(),
+                                'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
+                                'success': True
+                    
+                    # Si 'candidates' est là mais que la structure interne est mauvaise
+                    error_msg = "Erreur de parsing de la réponse (parties manquantes dans le candidat)."
+                    logger.error(f"Erreur de parsing pour {self.name}: {error_msg}")
+                    return self._fallback_response(error_msg=error_msg)
+                # --- FIN DE CORRECTION ---
             
             # Si l'API renvoie une erreur (quota, clé invalide, etc.)
             error_msg = response.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response.status_code}')
