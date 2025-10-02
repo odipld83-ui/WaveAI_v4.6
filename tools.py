@@ -2,16 +2,17 @@
 # -*- coding: utf-8 -*-
 """
 TOOLS.PY - Fonctions externes utilisées par les agents Gemini
-Version: Gmail API OAuth 2.0 (Réel) + Worker Scheduler
+Version: STABLE POSTGRESQL + Worker Logic
 """
 
 import os
-import sqlite3
 import json
 import logging
 from datetime import datetime, timedelta
 import base64
 from email.mime.text import MIMEText
+import psycopg2 
+from urllib.parse import urlparse
 
 # Librairies Google API
 from google.auth.transport.requests import Request
@@ -19,7 +20,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# Configuration du logging (pour utiliser le même logger que Flask)
+# Configuration du logging
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
@@ -32,10 +33,27 @@ GMAIL_SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/gmail.readonly'
 ]
-DATABASE_PATH = 'waveai.db'
 
-# --- Fonction Utilitaires pour Gmail API --
+# --- Nouvelle Fonction de Connexion DB ---
+def get_db_connection():
+    """Établit une connexion à PostgreSQL en utilisant DATABASE_URL."""
+    DATABASE_URL = os.environ.get('DATABASE_URL')
+    if not DATABASE_URL:
+        # Laisser l'exception se propager
+        raise EnvironmentError("Base de données non configurée.")
 
+    result = urlparse(DATABASE_URL)
+    return psycopg2.connect(
+        database=result.path[1:],
+        user=result.username,
+        password=result.password,
+        host=result.hostname,
+        port=result.port,
+        sslmode='require' 
+    )
+
+# --- Fonctions Utilitaires Gmail API (Le reste du code reste le même) ---
+# ... (get_gmail_service, create_message, send_message) ...
 def get_gmail_service():
     """
     Charge le jeton d'accès depuis token_gmail.json, rafraîchit
@@ -79,8 +97,6 @@ def create_message(sender: str, to: str, subject: str, message_text: str) -> dic
         message['from'] = sender
         message['subject'] = subject
         
-        # Le message doit être encodé en base64 pour l'API
-        # urlsafe=True permet de ne pas avoir à gérer les padding '='
         raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
         return {'raw': raw_message}
     except Exception as e:
@@ -90,7 +106,6 @@ def create_message(sender: str, to: str, subject: str, message_text: str) -> dic
 def send_message(service, user_id, message_body: dict) -> bool:
     """Envoie le message à travers l'API Gmail."""
     try:
-        # L'API Gmail envoie le message pour l'utilisateur spécifié ('me')
         (service.users().messages().send(userId=user_id, body=message_body)
            .execute())
         return True
@@ -158,31 +173,17 @@ def schedule_email_alert(recipient: str, subject: str, body: str, scheduled_date
             if message_body and send_message(service, 'me', message_body):
                 return f"E-mail à {recipient} (Sujet: {subject}) envoyé immédiatement avec succès."
             else:
-                # Si l'envoi immédiat échoue, on planifie dans la DB pour le worker
                 logger.warning("L'envoi immédiat a échoué. Planification de la tâche dans la DB.")
                 pass # Poursuivre vers la planification en DB
                 
-        # 2. Planification en DB (y compris en cas d'échec de l'envoi immédiat)
-        conn = sqlite3.connect(DATABASE_PATH)
+        # 2. Planification en DB (PostgreSQL)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
-        # NOTE: Création de la table avec le champ 'sent_at' pour le suivi
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scheduled_tasks (
-                id INTEGER PRIMARY KEY,
-                task_type TEXT NOT NULL,
-                recipient TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                body TEXT NOT NULL,
-                scheduled_date TIMESTAMP NOT NULL,
-                status TEXT DEFAULT 'pending',
-                sent_at TIMESTAMP
-            )
-        ''')
-
+        # NOTE: Utilisation de %s pour les paramètres et le type TIMESTAMP de PSQL
         cursor.execute('''
             INSERT INTO scheduled_tasks (task_type, recipient, subject, body, scheduled_date)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
         ''', ('email_alert', recipient, subject, body, scheduled_date.isoformat()))
         
         conn.commit()
@@ -200,24 +201,31 @@ def schedule_email_alert(recipient: str, subject: str, body: str, scheduled_date
 def run_scheduled_sender():
     """
     Fonction à exécuter périodiquement par un worker d'arrière-plan.
-    Elle lit la DB et envoie les messages planifiés.
+    Elle lit la DB PostgreSQL et envoie les messages planifiés.
     """
     logger.info("Démarrage du cycle de vérification des e-mails planifiés.")
-    service = get_gmail_service()
     
+    # Tentative d'initialisation du service Gmail
+    service = get_gmail_service()
     if not service:
         logger.error("Impossible d'obtenir le service Gmail pour le worker. Vérifiez le token.")
         return
         
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
+    # Tentative de connexion PostgreSQL
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+    except Exception as e:
+        logger.error(f"Erreur de connexion PostgreSQL pour le worker: {e}")
+        return
+
 
     # Sélectionner les tâches en attente qui sont passées
     now = datetime.now().isoformat()
     cursor.execute('''
         SELECT id, recipient, subject, body 
         FROM scheduled_tasks 
-        WHERE task_type = 'email_alert' AND status = 'pending' AND scheduled_date <= ?
+        WHERE task_type = 'email_alert' AND status = 'pending' AND scheduled_date <= %s
     ''', (now,))
     
     tasks = cursor.fetchall()
@@ -226,7 +234,6 @@ def run_scheduled_sender():
         logger.info(f"Traitement de {len(tasks)} e-mails planifiés en attente...")
         
     for task_id, recipient, subject, body in tasks:
-        # Le 'sender' sera déterminé par le profil de l'utilisateur du token
         message_body = create_message('me', recipient, subject, body)
         
         if message_body:
@@ -236,14 +243,14 @@ def run_scheduled_sender():
                 # Mettre à jour le statut dans la DB si l'envoi réussit
                 cursor.execute('''
                     UPDATE scheduled_tasks 
-                    SET status = 'sent', sent_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
+                    SET status = 'sent', sent_at = NOW()
+                    WHERE id = %s
                 ''', (task_id,))
                 conn.commit()
                 logger.info(f"E-mail planifié ID {task_id} envoyé avec succès à {recipient}.")
             else:
-                # L'envoi a échoué (problème temporaire ?). Le statut reste 'pending' pour réessayer plus tard.
-                logger.warning(f"Échec d'envoi de l'e-mail planifié ID {task_id}. Réessayera au prochain cycle.")
+                # L'envoi a échoué. On ne change pas le statut pour réessayer plus tard.
+                logger.warning(f"Échec d'envoi de l'e-mail planifié ID {task_id}.")
 
     conn.close()
     logger.info("Fin du cycle de vérification des e-mails planifiés.")
