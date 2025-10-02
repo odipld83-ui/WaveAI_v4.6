@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: GEMINI ONLY - STABILITÉ ULTIME ET DIAGNOSTIC CENSURE API
+Version: GEMINI ONLY - STABILITÉ ULTIME ET CORRECTION MAX_TOKENS
 """
 
 import os
@@ -275,7 +275,7 @@ class AIAgent:
         self.personality = personality
     
     def generate_response(self, message):
-        """Génère une réponse en utilisant Gemini (Version sécurisée avec journalisation détaillée)"""
+        """Génère une réponse en utilisant Gemini (Version sécurisée avec correction MAX_TOKENS)"""
         
         api_key = api_manager.get_api_key('gemini')
         if not api_key:
@@ -295,7 +295,7 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
                     {"role": "user", "parts": [{"text": message}]}
                 ],
                 "generationConfig": {
-                    "maxOutputTokens": 250,
+                    "maxOutputTokens": 1000,  # **CORRECTION**: Augmenté pour éviter l'erreur MAX_TOKENS
                     "temperature": 0.7
                 }
             }
@@ -309,8 +309,8 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
                 
                 if 'candidates' in result and result['candidates']:
                     candidate = result['candidates'][0]
+                    # La présence de 'parts' est la preuve que la réponse est complète
                     if 'content' in candidate and 'parts' in candidate['content'] and candidate['content']['parts']:
-                        # On accède au texte seulement si tous les champs existent
                         generated_text = candidate['content']['parts'][0].get('text')
                 
                 if generated_text:
@@ -321,7 +321,7 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
                         'success': True
                     }
                 
-                # *** NOUVELLE JOURNALISATION DÉTAILLÉE DU BLOCAGE ***
+                # Journalisation détaillée du blocage/échec pour diagnostic
                 error_msg = "Réponse Gemini bloquée ou vide. Réessayez avec une autre formulation."
                 
                 # Enregistre le JSON complet pour diagnostic
