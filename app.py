@@ -7,7 +7,7 @@ import requests
 import psycopg2 # Nécessite 'psycopg2-binary' dans requirements.txt
 from contextlib import contextmanager
 
-# Importez AVAILABLE_TOOLS (assurez-vous que tools.py est présent et contient ce dict)
+# Importez AVAILABLE_TOOLS (assurez-vous que tools.py est présent)
 try:
     from tools import AVAILABLE_TOOLS 
 except ImportError:
@@ -31,7 +31,6 @@ if not DATABASE_URL:
 def get_db_connection():
     """Fournit une connexion à la base de données PostgreSQL."""
     if not DATABASE_URL:
-        # Lève une erreur pour signaler l'absence de DB_URL (critique pour Render)
         raise Exception("DATABASE_URL non défini.")
     conn = None
     try:
@@ -49,7 +48,6 @@ class APIManager:
     """Gestionnaire pour la clé Gemini et autres services."""
     
     def __init__(self):
-        # La base de données est initialisée une fois au démarrage
         pass
         
     def init_database(self):
@@ -87,7 +85,7 @@ class APIManager:
                         (gemini_key_from_env,)
                     )
 
-                # Table pour les tâches planifiées (si non gérée par tools.py)
+                # Table pour les tâches planifiées (si on utilise la DB Postgre)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS scheduled_tasks (
                         id SERIAL PRIMARY KEY,
@@ -105,7 +103,7 @@ class APIManager:
                 logger.info("Base de données PostgreSQL initialisée avec succès")
         except Exception as e:
             logger.error(f"Erreur lors de l'initialisation de la base de données PostgreSQL: {e}")
-            raise e
+            # Ne pas relancer l'exception ici pour permettre au serveur de démarrer (avec avertissement)
 
     def get_api_key(self, provider):
         """Récupère la clé API la plus récente pour un fournisseur."""
@@ -168,8 +166,6 @@ class Agent:
             }
         }
         
-        # NOTE: La gestion complète des outils est plus complexe. Ici, seul l'appel simple est effectué.
-
         full_url = f"{url}?key={api_key}"
         
         try:
@@ -219,10 +215,20 @@ class Agent:
 # --- Définition des Agents ---
 agents = {
     'kai': Agent(
-        name='Kai (Generaliste)',
-        system_prompt="Tu es Kai, un assistant IA généraliste. Réponds aux questions de manière concise et amicale. N'utilise aucun outil pour l'instant."
+        name='Kai (Généraliste)',
+        system_prompt="Tu es Kai, un assistant IA généraliste et amical. Réponds aux questions générales, résous des problèmes simples de raisonnement ou de mathématiques, et donne des informations générales. N'utilise aucun outil pour l'instant.",
+        tools=None # Kai n'utilise aucun outil
     ),
-    # Vous pouvez ajouter d'autres agents ici si nécessaire.
+    'alex': Agent(
+        name='Alex (Outils & Planification)',
+        system_prompt="Tu es Alex, un assistant IA spécialisé dans l'utilisation des fonctions et des outils externes. Ton objectif principal est d'utiliser tes fonctions pour interagir avec des systèmes externes (comme Gmail ou Google Agenda) pour planifier, vérifier ou envoyer des informations. Si un outil est pertinent pour la demande, tu dois le proposer ou l'utiliser. Sinon, réponds normalement.",
+        tools=AVAILABLE_TOOLS # Alex utilise les outils définis dans tools.py
+    ),
+    'sophie': Agent(
+        name='Sophie (Analyste)',
+        system_prompt="Tu es Sophie, une IA spécialisée dans l'analyse de données, la structuration d'informations complexes, et la création de résumés précis. Ton style est professionnel, détaillé, et factuel. Concentre-toi sur la clarté et l'organisation des réponses.",
+        tools=None
+    )
 }
 
 
@@ -232,7 +238,6 @@ agents = {
 def home():
     """Page d'accueil."""
     api_key_status = api_manager.get_api_key('gemini') is not None
-    # Nécessite un fichier 'templates/index.html'
     return render_template('index.html', api_key_status=api_key_status)
 
 @app.route('/settings')
@@ -251,11 +256,11 @@ def settings():
                 keys_data.append({
                     'provider': provider.upper(),
                     'is_active': 'Oui' if is_active else 'Non',
+                    # Formatage des dates pour l'affichage (éviter les erreurs si la date est None)
                     'last_tested': last_tested.strftime('%Y-%m-%d %H:%M:%S') if last_tested else 'N/A',
                     'test_status': test_status
                 })
                 
-            # Nécessite un fichier 'templates/settings.html'
             return render_template('settings.html', keys=keys_data)
     except Exception as e:
         logger.error(f"Erreur lors de l'affichage des paramètres: {e}")
@@ -332,6 +337,5 @@ except Exception as e:
 
 if __name__ == '__main__':
     logger.info("Démarrage de WaveAI...")
-    # NOTE: Pour le développement local uniquement
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
