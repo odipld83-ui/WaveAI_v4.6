@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: GEMINI ONLY - STABILITÉ FINALE ET CORRECTION DB READ/CHAT ROBUSTESSE
+Version: GEMINI ONLY - STABILITÉ ULTIME ET DIAGNOSTIC CENSURE API
 """
 
 import os
@@ -275,7 +275,7 @@ class AIAgent:
         self.personality = personality
     
     def generate_response(self, message):
-        """Génère une réponse en utilisant Gemini (Version sécurisée)"""
+        """Génère une réponse en utilisant Gemini (Version sécurisée avec journalisation détaillée)"""
         
         api_key = api_manager.get_api_key('gemini')
         if not api_key:
@@ -305,7 +305,6 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
             if response.status_code == 200:
                 result = response.json()
                 
-                # *** CORRECTION DE ROBUSTESSE ***
                 generated_text = None
                 
                 if 'candidates' in result and result['candidates']:
@@ -322,10 +321,15 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
                         'success': True
                     }
                 
-                # Si la réponse est 200 mais qu'il n'y a pas de texte (probablement bloqué par sécurité)
+                # *** NOUVELLE JOURNALISATION DÉTAILLÉE DU BLOCAGE ***
                 error_msg = "Réponse Gemini bloquée ou vide. Réessayez avec une autre formulation."
+                
+                # Enregistre le JSON complet pour diagnostic
+                logger.error(f"Réponse Gemini Bloquée (JSON complet): {json.dumps(result)}")
+
                 if 'promptFeedback' in result and 'blockReason' in result['promptFeedback']:
-                    error_msg += f" (Raison: {result['promptFeedback']['blockReason']})"
+                    block_reason = result['promptFeedback']['blockReason']
+                    error_msg += f" (Raison: {block_reason})"
                 
                 logger.error(f"Erreur Gemini pour {self.name} (Réponse vide/bloquée) : {error_msg}")
                 return self._fallback_response(error_msg=error_msg)
