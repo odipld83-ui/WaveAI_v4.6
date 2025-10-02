@@ -12,6 +12,8 @@ import logging
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 import requests
+# Importer les outils réels (même si non utilisés directement ici)
+from tools import AVAILABLE_TOOLS # Assurez-vous que tools.py est dans le même dossier
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -53,13 +55,28 @@ class APIManager:
                 )
             ''')
             
+            # Table pour les tâches planifiées (utilisée par tools.py pour Gmail et Calendar)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                    id INTEGER PRIMARY KEY,
+                    task_type TEXT NOT NULL,
+                    recipient TEXT,
+                    subject TEXT,
+                    body TEXT,
+                    title TEXT,
+                    notes TEXT,
+                    duration_hours REAL,
+                    scheduled_date TIMESTAMP NOT NULL,
+                    status TEXT DEFAULT 'pending'
+                )
+            ''')
+            
             conn.commit()
             conn.close()
             logger.info("Base de données initialisée avec succès")
             
         except Exception as e:
             logger.error(f"Erreur lors de l'initialisation de la base de données: {e}")
-            # Ne pas faire de raise ici pour permettre au reste de l'app de continuer si la DB est problématique
     
     def save_api_key(self, provider, api_key):
         """Sauvegarde la clé API Gemini"""
@@ -238,13 +255,63 @@ class APIManager:
 # Instance globale du gestionnaire d'APIs
 api_manager = APIManager()
 
+# --- Fonctions Outils pour les Agents ---
+
+def generate_tool_config():
+    """Génère la liste des outils disponibles pour l'API Gemini (Alex et Sofia)"""
+    tool_config = {
+        "tools": [
+            {
+                "function_declarations": [
+                    {
+                        "name": tool_name,
+                        "description": tool_func.__doc__.strip(),
+                        "parameters": {
+                            "type": "OBJECT",
+                            "properties": {
+                                # Extrait les propriétés (arguments) à partir des annotations de type de la fonction
+                                # Cette structure simplifiée est acceptée par l'API
+                                # NOTE: En production, il faut une librairie plus robuste pour la génération du schéma.
+                                **{
+                                    param: {"type": "string"}
+                                    for param, type_hint in tool_func.__annotations__.items()
+                                    if param != 'return'
+                                }
+                            },
+                            "required": list(tool_func.__annotations__.keys())
+                        }
+                    } 
+                    for tool_name, tool_func in AVAILABLE_TOOLS.items()
+                ]
+            }
+        ]
+    }
+    return tool_config
+
+def execute_function(function_name, **kwargs):
+    """Exécute la fonction Python demandée par l'IA."""
+    if function_name in AVAILABLE_TOOLS:
+        try:
+            # Conversion des arguments en types attendus si nécessaire (non fait ici pour simplification)
+            result = AVAILABLE_TOOLS[function_name](**kwargs)
+            logger.info(f"Outil {function_name} exécuté avec succès.")
+            return result
+        except Exception as e:
+            logger.error(f"Erreur lors de l'exécution de l'outil {function_name}: {e}")
+            return f"Erreur lors de l'exécution de l'outil {function_name}: {str(e)}"
+    return f"Outil inconnu: {function_name}"
+
+# --- Définition de la Classe AIAgent ---
+
 class AIAgent:
     """Agent IA utilisant l'API Gemini"""
     
-    def __init__(self, name, role, personality):
+    def __init__(self, name, role, personality, use_tools=False):
         self.name = name
         self.role = role
         self.personality = personality
+        self.use_tools = use_tools
+        self.tools_config = generate_tool_config() if use_tools else None
     
     def generate_response(self, message):
         """Génère une réponse en utilisant Gemini"""
@@ -254,7 +321,6 @@ class AIAgent:
             return self._fallback_response()
         
         # Contexte personnalisé pour l'agent (System Instruction)
-        # CORRECTION FINALE : On utilise le rôle 'user' pour l'instruction système dans la conversation
         system_instruction = f"""Tu es {self.name}, {self.role}.
 Personnalité: {self.personality}
 Réponds de manière naturelle et personnalisée selon ton rôle.
@@ -263,51 +329,115 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
         try:
             url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
             
-            # Construction du payload
-            # La system instruction est passée dans 'contents' pour la stabilité
+            # Contenu de la requête
+            contents = [
+                # Instruction système passée comme premier message utilisateur
+                {"role": "user", "parts": [{"text": system_instruction}]},
+                # Message de l'utilisateur
+                {"role": "user", "parts": [{"text": message}]}
+            ]
+            
             payload = {
-                "contents": [
-                    # 1. Le rôle et la personnalité sont passés en premier message utilisateur
-                    {"role": "user", "parts": [{"text": system_instruction}]},
-                    # 2. Le message de l'utilisateur est le deuxième message utilisateur
-                    {"role": "user", "parts": [{"text": message}]}
-                ],
+                "contents": contents,
                 "generationConfig": {
                     "maxOutputTokens": 250,
                     "temperature": 0.7
                 }
             }
             
+            # Ajout des outils si l'agent les utilise
+            if self.use_tools and self.tools_config:
+                payload.update(self.tools_config)
+
+            # --- PREMIER APPEL API (POUR LA REQUÊTE OU L'APPEL DE FONCTION) ---
             response = requests.post(url, json=payload, timeout=30)
             
-            if response.status_code == 200:
-                result = response.json()
+            if response.status_code != 200:
+                 error_msg = response.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response.status_code}')
+                 logger.error(f"Erreur Gemini PREMIER APPEL pour {self.name}: {error_msg}")
+                 return self._fallback_response(error_msg=error_msg)
+
+            result = response.json()
+            
+            # --- CORRECTION DE L'ERREUR 'parts' pour l'AGENT ---
+            if 'candidates' in result and result['candidates']:
+                candidate = result['candidates'][0]
+                content = candidate.get('content')
                 
-                # --- CORRECTION DE L'ERREUR 'parts' pour l'AGENT ---
-                if 'candidates' in result and result['candidates']:
-                    candidate = result['candidates'][0]
-                    content = candidate.get('content')
+                # GESTION DE L'APPEL DE FONCTION
+                if 'functionCall' in candidate:
+                    func_call = candidate['functionCall']
+                    function_name = func_call['name']
+                    args = dict(func_call.get('args', {}))
                     
-                    if content and 'parts' in content and content['parts']:
-                        generated_text = content['parts'][0].get('text', '')
+                    # Exécuter l'outil
+                    tool_result = execute_function(function_name, **args)
                     
-                        if generated_text:
-                            return {
-                                'agent': self.name,
-                                'response': generated_text.strip(),
-                                'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
-                                'success': True
+                    # --- DEUXIÈME APPEL API (POUR RAPPORTER LE RÉSULTAT) ---
                     
-                    # Si 'candidates' est là mais que la structure interne est mauvaise
-                    error_msg = "Erreur de parsing de la réponse (parties manquantes dans le candidat)."
-                    logger.error(f"Erreur de parsing pour {self.name}: {error_msg}")
-                    return self._fallback_response(error_msg=error_msg)
-                # --- FIN DE CORRECTION ---
+                    # 1. Ajouter l'appel de fonction à l'historique
+                    contents.append({
+                        "role": "model",
+                        "parts": [{"functionCall": func_call}]
+                    })
+                    
+                    # 2. Ajouter le résultat de l'outil
+                    contents.append({
+                        "role": "function",
+                        "parts": [{"functionResponse": {"name": function_name, "response": {"result": tool_result}}}]
+                    })
+                    
+                    # 3. Mettre à jour le payload pour le deuxième appel
+                    payload['contents'] = contents
+                    
+                    response_2 = requests.post(url, json=payload, timeout=30)
+                    
+                    if response_2.status_code != 200:
+                         error_msg = response_2.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response_2.status_code}')
+                         logger.error(f"Erreur Gemini DEUXIÈME APPEL pour {self.name}: {error_msg}")
+                         return self._fallback_response(error_msg=f"Échec de la réponse après l'outil : {error_msg}")
+                         
+                    result_2 = response_2.json()
+                    
+                    # Extraction du texte final
+                    final_candidate = result_2['candidates'][0]
+                    final_content = final_candidate.get('content')
+                    
+                    if final_content and 'parts' in final_content and final_content['parts']:
+                        generated_text = final_content['parts'][0].get('text', '')
+                        
+                        return {
+                            'agent': self.name,
+                            'response': generated_text.strip(),
+                            'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]} + Outils)',
+                            'success': True
+                        }
+                    
+                    # Échec de l'extraction de la réponse finale
+                    return self._fallback_response(error_msg="L'outil a été appelé, mais la réponse finale est vide.")
+
+
+                # GESTION DE LA RÉPONSE TEXTE NORMALE
+                if content and 'parts' in content and content['parts']:
+                    generated_text = content['parts'][0].get('text', '')
+                
+                    if generated_text:
+                        return {
+                            'agent': self.name,
+                            'response': generated_text.strip(),
+                            'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
+                            'success': True
+                        } # <--- L'ACCOLADE MANQUANTE ÉTAIT ICI !
+                
+                # Si 'candidates' est là mais que la structure interne est mauvaise
+                error_msg = "Erreur de parsing de la réponse (parties manquantes dans le candidat)."
+                logger.error(f"Erreur de parsing pour {self.name}: {error_msg}")
+                return self._fallback_response(error_msg=error_msg)
+            # --- FIN DE CORRECTION ---
             
-            # Si l'API renvoie une erreur (quota, clé invalide, etc.)
-            error_msg = response.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response.status_code}')
+            # Si l'API renvoie un bloc vide sans erreur apparente (très rare)
+            error_msg = "Réponse Gemini vide ou inattendue."
             logger.error(f"Erreur Gemini pour {self.name}: {error_msg}")
-            
             return self._fallback_response(error_msg=error_msg)
             
         except Exception as e:
@@ -335,12 +465,13 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
             'success': False
         }
 
-# Création des agents (inchangé)
+# Création des agents (Alex utilise désormais les outils)
 agents = {
     'alex': AIAgent(
         "Alex", 
         "Assistant productivité et gestion",
-        "Expert en organisation, efficace et méthodique."
+        "Expert en organisation, efficace et méthodique, capable de gérer les e-mails et le calendrier.",
+        use_tools=True # Alex utilise les outils définis dans tools.py
     ),
     'lina': AIAgent(
         "Lina",
@@ -355,7 +486,8 @@ agents = {
     'sofia': AIAgent(
         "Sofia",
         "Organisatrice de calendrier et planification",
-        "Précise, organisée et anticipatrice."
+        "Précise, organisée et anticipatrice.",
+        use_tools=True # Sofia utilise les outils (pour le calendrier et les rappels)
     ),
     'kai': AIAgent(
         "Kai",
