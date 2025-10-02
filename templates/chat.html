@@ -249,9 +249,9 @@
             margin-top: 0.5rem;
         }
 
-        /* 💡 MODIFICATION CLÉ UX MOBILE: Le conteneur d'entrée doit être fixe */
+        /* CORRECTION CLÉ UX MOBILE: Le conteneur d'entrée doit être fixe */
         .chat-input-container {
-            padding: 0.75rem 1.5rem; /* Réduit le padding */
+            padding: 0.75rem 1.5rem; /* Padding par défaut */
             background: white;
             border-top: 1px solid #e9ecef;
             flex-shrink: 0;
@@ -259,7 +259,7 @@
 
         .input-group {
             display: flex;
-            gap: 0.5rem; /* Réduit le gap */
+            gap: 0.75rem;
             align-items: flex-end; /* Assure que le textarea est aligné en bas */
         }
 
@@ -270,14 +270,14 @@
 
         #messageInput {
             width: 100%;
-            padding: 0.75rem 1rem; /* Réduit le padding du textarea */
+            padding: 0.75rem 1rem;
             border: 2px solid #e9ecef;
             border-radius: 25px;
             font-size: 1rem;
             outline: none;
             transition: all 0.3s ease;
             resize: none;
-            min-height: 45px; /* Réduit la hauteur minimale */
+            min-height: 45px;
             max-height: 120px;
         }
 
@@ -292,8 +292,8 @@
         }
 
         .control-btn {
-            width: 45px; /* Taille légèrement réduite */
-            height: 45px; /* Taille légèrement réduite */
+            width: 45px;
+            height: 45px;
             border: none;
             border-radius: 50%;
             background: linear-gradient(135deg, #667eea, #764ba2);
@@ -386,54 +386,62 @@
         }
         
         /* ======================================= */
-        /* 💡 MÉDIA QUERIES POUR MOBILE (WhatsApp style) */
+        /* 💡 CORRECTION DU DESIGN MOBILE (WhatsApp style) */
         /* ======================================= */
         @media (max-width: 768px) {
             body {
-                /* Permet à l'application de prendre tout l'écran verticalement */
+                /* Force l'application à prendre toute la hauteur verticale */
                 min-height: 100vh;
+                height: 100vh;
+                overflow: hidden; /* Empêche le défilement général */
             }
 
             .main-container {
                 flex-direction: column;
-                padding: 0;
-                gap: 0;
+                padding: 0; /* Pas de padding horizontal */
+                gap: 0; /* Pas de gap */
                 margin: 0;
                 flex: 1;
-                /* Le conteneur principal prend tout l'espace restant sous le header */
+                /* Crucial: Prend la hauteur restante sous le header */
                 height: calc(100vh - 67px); 
                 max-width: 100%;
             }
 
             .chat-panel {
-                /* Prend toute la largeur et la hauteur restante */
+                /* Le panneau de chat prend tout l'espace restant et utilise Flex pour ses enfants */
                 width: 100%;
                 border-radius: 0;
                 box-shadow: none;
                 flex: 1; 
                 overflow: hidden;
+                display: flex;
+                flex-direction: column;
+                order: 2; /* Positionne le chat entre la barre d'agents et l'input */
+            }
+
+            .chat-header {
+                flex-shrink: 0;
             }
             
             .chat-messages {
                 padding: 1rem;
-                flex: 1;
-                /* La hauteur est maintenant calculée par le flexbox */
+                flex: 1; /* Le conteneur de messages remplit l'espace */
                 max-height: unset; 
                 overflow-y: auto;
             }
 
             .agents-panel {
-                /* Le panneau d'agents devient une barre de défilement horizontale en haut */
+                /* Devient une barre de défilement horizontale en haut, comme les onglets */
                 width: 100%;
                 display: flex;
                 overflow-x: auto;
-                padding: 0.5rem 1rem;
+                padding: 0.5rem 0.5rem;
                 border-radius: 0;
                 background: white;
                 box-shadow: 0 5px 10px rgba(0, 0, 0, 0.05);
                 margin: 0;
                 flex-wrap: nowrap;
-                order: 1; /* Place la barre d'agents après le header mais avant le chat */
+                order: 1;
             }
 
             .agents-title {
@@ -441,7 +449,7 @@
             }
 
             .agent-card {
-                min-width: 100px; /* Assure la visibilité sur mobile */
+                min-width: 100px;
                 margin-right: 0.5rem;
                 margin-bottom: 0;
                 flex-shrink: 0;
@@ -452,15 +460,15 @@
                 font-size: 0.7rem;
             }
             
-            /* 💡 Le chat-input-container devient fixe en bas */
+            /* CRITICAL: La zone de saisie est fixée au bas de l'écran */
             .chat-input-container {
                 position: sticky;
                 bottom: 0;
                 width: 100%;
                 z-index: 10;
-                padding: 0.75rem 0.5rem;
+                padding: 0.75rem 0.5rem; /* Padding réduit pour économiser de l'espace */
                 box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.1);
-                order: 3; /* Le met en bas du flexbox */
+                order: 3;
             }
             
             .header {
@@ -468,18 +476,21 @@
                 order: 0;
             }
 
-            .header-controls {
-                gap: 0.5rem;
-            }
-
-            .btn {
-                padding: 0.4rem 0.8rem;
-                font-size: 0.8rem;
-            }
-            
             .message-content {
                 /* Les bulles de chat sont plus larges sur petit écran */
-                max-width: 85%;
+                max-width: 90%;
+            }
+            
+            /* Ajustement de la taille de l'input et des boutons */
+            #messageInput {
+                padding: 0.5rem 1rem;
+                min-height: 40px;
+                max-height: 100px;
+            }
+
+            .control-btn {
+                width: 40px;
+                height: 40px;
             }
         }
     </style>
@@ -589,8 +600,7 @@
         let currentAgent = 'kai';
         let isRecording = false;
         let recognition = null;
-        // 💡 CLÉ: Variable pour stocker l'historique de la conversation (format API Gemini)
-        let conversationHistory = []; 
+        let conversationHistory = []; // Ajout de l'historique pour l'API
 
         // Configuration des agents
         const agentConfig = {
@@ -683,7 +693,7 @@
         function selectAgent(agentName) {
             currentAgent = agentName;
             
-            // 💡 CRITIQUE: Réinitialiser l'historique lors du changement d'agent
+            // Réinitialiser l'historique lors du changement d'agent
             conversationHistory = [];
 
             // Mettre à jour l'interface
@@ -707,7 +717,7 @@
             
             if (!message) return;
 
-            // Ajouter le message utilisateur à l'interface
+            // Ajouter le message utilisateur
             addMessage('user', 'Vous', message);
             input.value = '';
             autoResize();
@@ -724,8 +734,7 @@
                     body: JSON.stringify({
                         message: message,
                         agent: currentAgent,
-                        // 💡 CRITIQUE: Inclure l'historique de la conversation
-                        history: conversationHistory 
+                        history: conversationHistory // Inclure l'historique
                     })
                 });
 
@@ -735,16 +744,11 @@
                 document.getElementById(loadingId).remove();
 
                 if (data.success) {
-                    // Ajouter la réponse de l'agent à l'interface
                     addMessage('agent', data.agent, data.response);
                     updateAPIStatus(data.api_working, data.provider);
-                    
-                    // 💡 CRITIQUE: Mettre à jour l'historique local avec celui du backend
-                    conversationHistory = data.history || []; 
-
+                    conversationHistory = data.history || []; // Mettre à jour l'historique
                 } else {
                     addMessage('agent', 'Erreur', data.message || 'Erreur lors du traitement', false, 'error');
-                    // En cas d'erreur, ne pas modifier l'historique pour essayer de récupérer
                 }
 
             } catch (error) {
