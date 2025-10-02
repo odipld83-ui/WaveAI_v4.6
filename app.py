@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: GEMINI FINAL avec FUNCTION CALLING
+Version: GEMINI FINAL avec FUNCTION CALLING (JSON CORRIGÉ)
 """
 
 import os
@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__file__)
+app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'waveai-secret-key-2024')
 
 # Configuration de la base de données (PostgreSQL)
@@ -285,7 +285,7 @@ class AIAgent:
         self.personality = personality
     
     def generate_response(self, message):
-        """Génère une réponse en utilisant Gemini, supportant le Function Calling."""
+        """Génère une réponse en utilisant Gemini, supportant le Function Calling (JSON CORRIGÉ)."""
         
         api_key = api_manager.get_api_key('gemini')
         if not api_key:
@@ -306,14 +306,12 @@ Utilise les fonctions disponibles si elles sont pertinentes pour répondre à la
         try:
             url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
             
-            # **[2. PRÉPARATION DU PAYLOAD INITIAL]** : Ajout des outils disponibles
+            # **[2. PRÉPARATION DU PAYLOAD INITIAL CORRIGÉ]** : 'tools' est un champ de premier niveau
             payload = {
                 "contents": conversation_history,
-                "config": {
-                    "tools": [{"functionDeclarations": get_tool_specs()}] if TOOLS_AVAILABLE else [],
-                },
+                "tools": [{"functionDeclarations": get_tool_specs()}] if TOOLS_AVAILABLE else [], # <-- CORRECTION ICI
                 "generationConfig": {
-                    "maxOutputTokens": 1000,
+                    "maxOutputTokens": 1000, # Jeton max maintenu à 1000 comme convenu
                     "temperature": 0.7
                 }
             }
@@ -356,6 +354,8 @@ Utilise les fonctions disponibles si elles sont pertinentes pour répondre à la
                         })
                         
                         payload["contents"] = conversation_history
+                        
+                        # Le payload pour le second appel est déjà correct (tools est déjà au top niveau)
                         
                         # --- Étape 3 : Second appel à Gemini pour générer la réponse finale ---
                         response = requests.post(url, json=payload, timeout=30)
@@ -577,7 +577,7 @@ def chat():
             'message': f'Erreur lors du traitement: {str(e)}'
         })
 
-if __file__ == '__main__':
+if __name__ == '__main__':
     try:
         logger.info("Démarrage de WaveAI...")
         api_manager.init_database()
