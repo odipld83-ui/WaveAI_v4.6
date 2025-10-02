@@ -218,4 +218,3 @@ AVAILABLE_TOOLS = {
     'add_calendar_event': add_calendar_event,
     'check_priority_mail': check_priority_mail,
     'schedule_email_alert': schedule_email_alert
-}
