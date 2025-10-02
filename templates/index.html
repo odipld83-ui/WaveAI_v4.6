@@ -176,3 +176,135 @@
             <h1>WaveAI - Chat Agent</h1>
             <a href="/settings" style="color: white; text-decoration: none; font-size: 1.5em;" title="Configuration">⚙️</a>
         </div>
+        
+        <div class="chat-box" id="chat-box">
+            <div class="message-bubble agent">
+                <div class="bubble-content">
+                    <span class="agent-name">Kai</span>
+                    {% if api_key_status %}
+                        Bienvenue ! Je suis Kai. L'API est connectée. Quel agent souhaitez-vous utiliser ?
+                    {% else %}
+                        Bienvenue ! <span style="color: red; font-weight: bold;">Attention: La clé Gemini est manquante.</span> Veuillez la configurer via la roue dentée (⚙️) en haut à droite.
+                    {% endif %}
+                </div>
+            </div>
+            </div>
+
+        <div class="input-area">
+            <select id="agent-select">
+                <option value="kai" selected>Kai (Généraliste)</option>
+                <option value="alex">Alex (Outils)</option>
+                <option value="sophie">Sophie (Analyste)</option>
+            </select>
+            
+            <button class="pj-btn" title="Pièce Jointe (Non fonctionnel)" onclick="alert('La fonctionnalité de pièce jointe est en cours de développement.')">📎</button>
+            
+            <input type="text" id="user-input" placeholder="Écrire un message..." onkeypress="handleKeyPress(event)">
+            
+            <button onclick="sendMessage()">➡️</button>
+        </div>
+        
+        <div class="api-status">
+            Statut API Gemini : <span id="api-status-text" style="color: {% if api_key_status %}#4CAF50{% else %}#f44336{% endif %}; font-weight: bold;">{% if api_key_status %}Connecté{% else %}Non connecté{% endif %}</span>
+        </div>
+
+    </div>
+
+    <script>
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        function sendMessage() {
+            const inputElement = document.getElementById('user-input');
+            const agentSelect = document.getElementById('agent-select');
+            const message = inputElement.value.trim();
+            const chatBox = document.getElementById('chat-box');
+            const selectedAgent = agentSelect.value;
+            const selectedAgentName = agentSelect.options[agentSelect.selectedIndex].text.split(' ')[0];
+
+            if (message === "") return;
+
+            // Afficher le message de l'utilisateur
+            chatBox.innerHTML += `
+                <div class="message-bubble user">
+                    <div class="bubble-content">${message}</div>
+                </div>
+            `;
+            inputElement.value = '';
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            // Afficher un message d'attente
+            const loadingMsgId = 'loading-' + Date.now();
+            chatBox.innerHTML += `
+                <div class="message-bubble agent" id="${loadingMsgId}">
+                    <div class="bubble-content">
+                        <span class="agent-name">${selectedAgentName}</span>
+                        ... (réflexion en cours)
+                    </div>
+                </div>
+            `;
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            // Envoyer à l'API Flask
+            fetch('/api/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ message: message, agent: selectedAgent })
+            })
+            .then(response => response.json())
+            .then(data => {
+                // Remplacer le message d'attente par la réponse
+                const loadingElement = document.getElementById(loadingMsgId);
+                if (loadingElement) {
+                    loadingElement.remove();
+                }
+                
+                // Récupérer le prénom de l'agent
+                const agentDisplayName = data.agent.split(' ')[0]; 
+
+                if (data.success) {
+                    chatBox.innerHTML += `
+                        <div class="message-bubble agent">
+                            <div class="bubble-content">
+                                <span class="agent-name">${agentDisplayName}</span>
+                                ${data.response}
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    chatBox.innerHTML += `
+                        <div class="message-bubble agent">
+                            <div class="bubble-content" style="color: red;">
+                                <span class="agent-name">${agentDisplayName}</span>
+                                ERREUR: ${data.response || data.message}
+                            </div>
+                        </div>
+                    `;
+                }
+                chatBox.scrollTop = chatBox.scrollHeight;
+            })
+            .catch(error => {
+                console.error('Erreur API:', error);
+                const loadingElement = document.getElementById(loadingMsgId);
+                if (loadingElement) {
+                    loadingElement.remove();
+                }
+                chatBox.innerHTML += `
+                    <div class="message-bubble agent">
+                        <div class="bubble-content" style="color: red;">
+                            <span class="agent-name">${selectedAgentName}</span>
+                            Erreur de connexion serveur ou réseau.
+                        </div>
+                    </div>
+                `;
+                chatBox.scrollTop = chatBox.scrollHeight;
+            });
+        }
+    </script>
+</body>
+</html>
