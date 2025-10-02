@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>WaveAI - Chat Agent</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; }
+        .container { max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0, 0, 0, 0.1); }
+        .chat-box { border: 1px solid #ccc; padding: 10px; height: 400px; overflow-y: scroll; margin-bottom: 10px; border-radius: 5px; }
+        .input-area { display: flex; }
+        .input-area input { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 5px 0 0 5px; }
+        .input-area button { padding: 10px; border: none; background-color: #007bff; color: white; cursor: pointer; border-radius: 0 5px 5px 0; }
+        .message { margin-bottom: 8px; padding: 5px; border-radius: 5px; }
+        .user { text-align: right; background-color: #d1e7ff; }
+        .agent { text-align: left; background-color: #e9ecef; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WaveAI - Chat Agent (PostgreSQL OK)</h1>
+        {% if api_key_status %}
+            <p style="color: green;">Statut de l'API Gemini : Connecté et fonctionnel.</p>
+        {% else %}
+            <p style="color: red;">Statut de l'API Gemini : Clé manquante ou invalide. Veuillez vérifier la variable GEMINI_API_KEY.</p>
+        {% endif %}
+
+        <div class="chat-box" id="chat-box">
+            <div class="message agent">Bienvenue ! Je suis Kai, votre assistant. Comment puis-je vous aider ?</div>
+        </div>
+
+        <div class="input-area">
+            <input type="text" id="user-input" placeholder="Tapez votre message ici...">
+            <button onclick="sendMessage()">Envoyer</button>
+        </div>
+    </div>
+
+    <script>
+        function sendMessage() {
+            const inputElement = document.getElementById('user-input');
+            const message = inputElement.value.trim();
+            const chatBox = document.getElementById('chat-box');
+
+            if (message === "") return;
+
+            // Afficher le message de l'utilisateur
+            chatBox.innerHTML += `<div class="message user"><strong>Vous:</strong> ${message}</div>`;
+            inputElement.value = '';
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            // Afficher un message d'attente
+            const loadingMsgId = 'loading-' + Date.now();
+            chatBox.innerHTML += `<div class="message agent" id="${loadingMsgId}">... (réflexion en cours)</div>`;
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            // Envoyer à l'API Flask
+            fetch('/api/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ message: message, agent: 'alex' }) // Agent Alex par défaut (pour tester les outils)
+            })
+            .then(response => response.json())
+            .then(data => {
+                // Remplacer le message d'attente par la réponse
+                const loadingElement = document.getElementById(loadingMsgId);
+                if (loadingElement) {
+                    loadingElement.remove();
+                }
+
+                if (data.success) {
+                    chatBox.innerHTML += `<div class="message agent"><strong>${data.agent}:</strong> ${data.response}</div>`;
+                } else {
+                    chatBox.innerHTML += `<div class="message agent" style="color: red;">Erreur: ${data.message}</div>`;
+                }
+                chatBox.scrollTop = chatBox.scrollHeight;
+            })
+            .catch(error => {
+                console.error('Erreur API:', error);
+                const loadingElement = document.getElementById(loadingMsgId);
+                if (loadingElement) {
+                    loadingElement.remove();
+                }
+                chatBox.innerHTML += `<div class="message agent" style="color: red;">Erreur de connexion serveur.</div>`;
+                chatBox.scrollTop = chatBox.scrollHeight;
+            });
+        }
+    </script>
+</body>
+</html>
