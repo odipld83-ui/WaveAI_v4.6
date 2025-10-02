@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: GEMINI FINAL avec FUNCTION CALLING (JSON CORRIGÉ)
+Version: GEMINI V5 (Contexte persistant, Time Injection, JSON API fix)
 """
 
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, render_template, request, jsonify
 import requests
 
@@ -197,7 +197,6 @@ class APIManager:
                 'key_preview': key_to_display[:8] + '...' if key_to_display and len(key_to_display) > 8 else (key_to_display if key_to_display else 'N/A'),
                 'status': status,
                 'last_tested': last_tested.isoformat() if last_tested else None,
-                'created_at': created_at.isoformat() if created_at else None,
                 'model': GEMINI_MODEL
             }
             
@@ -284,24 +283,50 @@ class AIAgent:
         self.role = role
         self.personality = personality
     
-    def generate_response(self, message):
-        """Génère une réponse en utilisant Gemini, supportant le Function Calling (JSON CORRIGÉ)."""
+    # 💡 MODIFICATION : Ajout du paramètre 'history' pour la persistance de contexte
+    def generate_response(self, message, history=[]):
+        """Génère une réponse en utilisant Gemini, supportant le Function Calling et la persistance de contexte."""
         
         api_key = api_manager.get_api_key('gemini')
         if not api_key:
             return self._fallback_response()
         
-        system_instruction = f"""Tu es {self.name}, {self.role}.
+        # --- NOUVEAU: INJECTION DE L'HEURE ACTUELLE POUR ALEX ---
+        system_instruction_base = f"""Tu es {self.name}, {self.role}.
 Personnalité: {self.personality}
 Réponds de manière naturelle et personnalisée selon ton rôle.
 Garde tes réponses concises et utiles (maximum 150 mots).
 Utilise les fonctions disponibles si elles sont pertinentes pour répondre à la demande de l'utilisateur."""
 
-        # Historique de la conversation pour le Function Calling
-        conversation_history = [
-            {"role": "user", "parts": [{"text": system_instruction}]},
-            {"role": "user", "parts": [{"text": message}]}
-        ]
+        system_instruction = system_instruction_base
+        
+        # Le serveur Render est en UTC, utilisons l'heure UTC
+        current_datetime_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+
+        # Instructions supplémentaires UNIQUEMENT pour Alex (gestionnaire de tâches)
+        if self.name.lower() == 'alex':
+            # Cette instruction force l'agent à utiliser la date/heure pour 'maintenant'
+            system_instruction += f"""
+Instructions spécifiques pour la planification: 
+Si l'utilisateur te demande d'envoyer un e-mail 'maintenant' ou 'immédiatement', 
+tu **DOIS** utiliser la date et l'heure actuelle pour l'argument 'scheduled_date_str' de la fonction 'schedule_email_alert'.
+Date et Heure Actuelles (UTC): **{current_datetime_utc}** (Format: YYYY-MM-DD HH:MM).
+Tu **NE DOIS PAS** demander cette information à l'utilisateur si elle est manquante. Utilise {current_datetime_utc} immédiatement.
+"""
+        
+        # --- Historique de la conversation pour le Function Calling ---
+        
+        # 💡 MODIFICATION : Initialisation de l'historique avec l'instruction système
+        conversation_history = [{"role": "user", "parts": [{"text": system_instruction}]}] 
+        
+        # 💡 AJOUT : Ajout de l'historique précédent (fourni par le front-end)
+        for entry in history:
+            # S'assurer que les entrées passées sont au format Gemini
+            if 'role' in entry and 'parts' in entry:
+                conversation_history.append(entry)
+            
+        # 💡 AJOUT : Ajout du message ACTUEL de l'utilisateur
+        conversation_history.append({"role": "user", "parts": [{"text": message}]})
         
         try:
             url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
@@ -309,9 +334,9 @@ Utilise les fonctions disponibles si elles sont pertinentes pour répondre à la
             # **[2. PRÉPARATION DU PAYLOAD INITIAL CORRIGÉ]** : 'tools' est un champ de premier niveau
             payload = {
                 "contents": conversation_history,
-                "tools": [{"functionDeclarations": get_tool_specs()}] if TOOLS_AVAILABLE else [], # <-- CORRECTION ICI
+                "tools": [{"functionDeclarations": get_tool_specs()}] if TOOLS_AVAILABLE else [], 
                 "generationConfig": {
-                    "maxOutputTokens": 1000, # Jeton max maintenu à 1000 comme convenu
+                    "maxOutputTokens": 1000, 
                     "temperature": 0.7
                 }
             }
@@ -355,8 +380,6 @@ Utilise les fonctions disponibles si elles sont pertinentes pour répondre à la
                         
                         payload["contents"] = conversation_history
                         
-                        # Le payload pour le second appel est déjà correct (tools est déjà au top niveau)
-                        
                         # --- Étape 3 : Second appel à Gemini pour générer la réponse finale ---
                         response = requests.post(url, json=payload, timeout=30)
                         
@@ -372,7 +395,9 @@ Utilise les fonctions disponibles si elles sont pertinentes pour répondre à la
                                         'agent': self.name,
                                         'response': generated_text.strip(),
                                         'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
-                                        'success': True
+                                        'success': True,
+                                        # 💡 AJOUT : Retour de l'historique mis à jour pour le front-end
+                                        'updated_history': conversation_history
                                     }
 
                         # Si l'API échoue ou ne donne pas de réponse finale au 2ème appel
@@ -395,7 +420,9 @@ Utilise les fonctions disponibles si elles sont pertinentes pour répondre à la
                         'agent': self.name,
                         'response': generated_text.strip(),
                         'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
-                        'success': True
+                        'success': True,
+                        # 💡 AJOUT : Retour de l'historique mis à jour pour le front-end
+                        'updated_history': conversation_history
                     }
 
             # --- GESTION DES BLOCAGES ET ERREURS INATTENDUES ---
@@ -432,7 +459,8 @@ Utilise les fonctions disponibles si elles sont pertinentes pour répondre à la
             'agent': self.name,
             'response': f"{fallback_responses.get(self.name.lower(), fallback_responses['kai'])} ({reason})",
             'provider': 'Mode Démo (Gemini non configuré)',
-            'success': False
+            'success': False,
+            'updated_history': [] # Ajout du champ pour la cohérence
         }
 
 
@@ -546,12 +574,15 @@ def get_api_status():
         logger.error(f"Erreur statut APIs: {e}")
         return jsonify({'success': False, 'message': str(e)})
 
+# 💡 MODIFICATION : Ajout de la gestion de l'historique dans le payload de la route /api/chat
 @app.route('/api/chat', methods=['POST'])
 def chat():
     try:
         data = request.get_json()
         message = data.get('message', '').strip()
         agent_name = data.get('agent', 'kai').lower()
+        # 💡 AJOUT : Récupération de l'historique de la conversation depuis le front-end
+        history = data.get('history', []) 
         
         if not message:
             return jsonify({'success': False, 'message': 'Message vide'})
@@ -560,21 +591,25 @@ def chat():
             agent_name = 'kai'
         
         agent = agents[agent_name]
-        response_data = agent.generate_response(message)
+        # 💡 MODIFICATION : Passage de l'historique à la fonction de génération
+        response_data = agent.generate_response(message, history) 
         
+        # 💡 MODIFICATION : Le front-end doit utiliser 'updated_history' pour le prochain tour
         return jsonify({
             'success': True,
             'agent': response_data['agent'],
             'response': response_data['response'],
             'provider': response_data['provider'],
-            'api_working': response_data['success']
+            'api_working': response_data['success'],
+            'history': response_data.get('updated_history', []) # Renvoie l'historique mis à jour
         })
         
     except Exception as e:
         logger.error(f"Erreur chat: {e}")
         return jsonify({
             'success': False, 
-            'message': f'Erreur lors du traitement: {str(e)}'
+            'message': f'Erreur lors du traitement: {str(e)}',
+            'history': history # Renvoie l'historique non modifié en cas d'erreur
         })
 
 if __name__ == '__main__':
