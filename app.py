@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: GEMINI ONLY - STABILITÉ FINALE ET CORRECTION DB READ
+Version: GEMINI ONLY - STABILITÉ FINALE ET CORRECTION DB READ/CHAT ROBUSTESSE
 """
 
 import os
@@ -110,7 +110,6 @@ class APIManager:
                 logger.info("Base de données PostgreSQL initialisée/mise à jour avec succès")
         except Exception as e:
             logger.error(f"Erreur lors de l'initialisation/mise à jour de la base de données PostgreSQL: {e}")
-            # L'erreur de migration n'est pas critique pour le déploiement.
 
     def save_api_key(self, provider, api_key):
         """Sauvegarde la clé API."""
@@ -158,13 +157,13 @@ class APIManager:
     def get_api_status(self, provider='gemini'):
         """
         Récupère le statut de l'API Gemini.
-        **CORRECTION DB READ**: Retire la colonne 'created_at' de la requête SELECT.
+        Sélectionne uniquement les colonnes critiques pour éviter les erreurs de migration.
         """
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
-                # REQUÊTE STABILISÉE: ne sélectionne que les colonnes garanties d'exister
+                # REQUÊTE STABILISÉE
                 cursor.execute('''
                     SELECT api_key, test_status, last_tested 
                     FROM api_keys 
@@ -176,9 +175,8 @@ class APIManager:
             key_from_db = result[0] if result else None
             status = result[1] if result else 'missing'
             last_tested = result[2] if result else None
-            created_at = None # La colonne n'est plus sélectionnée pour éviter l'erreur
+            created_at = None 
             
-            # ... (Le reste de la fonction reste le même)
             key_from_env = os.getenv('GEMINI_API_KEY')
             
             is_configured = (key_from_db is not None) or (key_from_env is not None)
@@ -243,9 +241,10 @@ class APIManager:
             
             if response.status_code == 200:
                 result = response.json()
+                # Vérification plus robuste pour le test
                 if 'candidates' in result and result['candidates']:
-                    content = result['candidates'][0]['content']
-                    if 'parts' in content and content['parts']:
+                    content = result['candidates'][0].get('content')
+                    if content and 'parts' in content and content['parts']:
                         text = content['parts'][0].get('text', '').strip().upper()
                         if 'OK' in text or 'OK' == text:
                             self.log_test_result('gemini', 'success')
@@ -276,7 +275,7 @@ class AIAgent:
         self.personality = personality
     
     def generate_response(self, message):
-        """Génère une réponse en utilisant Gemini"""
+        """Génère une réponse en utilisant Gemini (Version sécurisée)"""
         
         api_key = api_manager.get_api_key('gemini')
         if not api_key:
@@ -305,14 +304,31 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
             
             if response.status_code == 200:
                 result = response.json()
+                
+                # *** CORRECTION DE ROBUSTESSE ***
+                generated_text = None
+                
                 if 'candidates' in result and result['candidates']:
-                    generated_text = result['candidates'][0]['content']['parts'][0]['text']
+                    candidate = result['candidates'][0]
+                    if 'content' in candidate and 'parts' in candidate['content'] and candidate['content']['parts']:
+                        # On accède au texte seulement si tous les champs existent
+                        generated_text = candidate['content']['parts'][0].get('text')
+                
+                if generated_text:
                     return {
                         'agent': self.name,
                         'response': generated_text.strip(),
                         'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
                         'success': True
                     }
+                
+                # Si la réponse est 200 mais qu'il n'y a pas de texte (probablement bloqué par sécurité)
+                error_msg = "Réponse Gemini bloquée ou vide. Réessayez avec une autre formulation."
+                if 'promptFeedback' in result and 'blockReason' in result['promptFeedback']:
+                    error_msg += f" (Raison: {result['promptFeedback']['blockReason']})"
+                
+                logger.error(f"Erreur Gemini pour {self.name} (Réponse vide/bloquée) : {error_msg}")
+                return self._fallback_response(error_msg=error_msg)
             
             error_msg = response.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response.status_code}')
             logger.error(f"Erreur Gemini pour {self.name}: {error_msg}")
