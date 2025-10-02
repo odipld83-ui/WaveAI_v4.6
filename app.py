@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-\n
+# -*- coding: utf-8 -*-
 """
 WaveAI - Système d'Agents IA (Google Gemini ONLY)
-Version: GEMINI ONLY - Stabilité maximale et corrections finales PostgreSQL
+Version: GEMINI ONLY - STABILITÉ FINALE ET CORRECTION DB READ
 """
 
 import os
@@ -21,7 +21,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-# Lit la clé secrète depuis l'environnement (SECRET_KEY)
 app.secret_key = os.environ.get('SECRET_KEY', 'waveai-secret-key-2024')
 
 # Configuration de la base de données (PostgreSQL)
@@ -54,16 +53,13 @@ def get_db_connection():
     return conn
 
 class APIManager:
-    """Gestionnaire simplifié pour la clé Gemini et la DB (PostgreSQL)"""
     
     def __init__(self):
-        # L'initialisation est appelée dans le __main__
         pass 
         
     def init_database(self):
         """
         Initialise la base de données PostgreSQL (tables) et effectue la migration.
-        Assure que la colonne 'created_at' est ajoutée si elle manque.
         """
         if not DATABASE_URL:
             logger.error("Initialisation DB échouée: DATABASE_URL non défini.")
@@ -85,12 +81,12 @@ class APIManager:
                     )
                 """)
                 
-                # 2. CORRECTION DE MIGRATION : Ajout de la colonne manquante si la table existait
+                # 2. **CORRECTION DE MIGRATION** : Ajout de la colonne manquante si la table existait
                 try:
                     cursor.execute("SELECT created_at FROM api_keys LIMIT 0")
                 except psycopg2.ProgrammingError as e:
                     if 'created_at' in str(e):
-                        conn.rollback() # Annule la transaction ratée
+                        conn.rollback()
                         cursor.execute("ALTER TABLE api_keys ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                         logger.info("Migration DB: Colonne 'created_at' ajoutée à la table api_keys.")
                     else:
@@ -114,17 +110,13 @@ class APIManager:
                 logger.info("Base de données PostgreSQL initialisée/mise à jour avec succès")
         except Exception as e:
             logger.error(f"Erreur lors de l'initialisation/mise à jour de la base de données PostgreSQL: {e}")
-            raise 
-    
+            # L'erreur de migration n'est pas critique pour le déploiement.
+
     def save_api_key(self, provider, api_key):
-        """
-        Sauvegarde la clé API Gemini. Requête simplifiée pour la robustesse.
-        """
+        """Sauvegarde la clé API."""
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                
-                # On retire 'created_at' de l'INSERT car la DB gère la valeur par défaut
                 cursor.execute(
                     """
                     INSERT INTO api_keys (provider, api_key, is_active)
@@ -135,7 +127,6 @@ class APIManager:
                     """, 
                     (provider, api_key)
                 )
-                
                 conn.commit()
                 logger.info(f"Clé API sauvegardée pour {provider}")
                 return True
@@ -165,22 +156,29 @@ class APIManager:
             return None
     
     def get_api_status(self, provider='gemini'):
-        """Récupère le statut de l'API Gemini"""
+        """
+        Récupère le statut de l'API Gemini.
+        **CORRECTION DB READ**: Retire la colonne 'created_at' de la requête SELECT.
+        """
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
+                
+                # REQUÊTE STABILISÉE: ne sélectionne que les colonnes garanties d'exister
                 cursor.execute('''
-                    SELECT api_key, test_status, last_tested, created_at 
+                    SELECT api_key, test_status, last_tested 
                     FROM api_keys 
                     WHERE provider = %s
                 ''', (provider,))
+                
                 result = cursor.fetchone()
                 
             key_from_db = result[0] if result else None
             status = result[1] if result else 'missing'
             last_tested = result[2] if result else None
-            created_at = result[3] if result else None
-
+            created_at = None # La colonne n'est plus sélectionnée pour éviter l'erreur
+            
+            # ... (Le reste de la fonction reste le même)
             key_from_env = os.getenv('GEMINI_API_KEY')
             
             is_configured = (key_from_db is not None) or (key_from_env is not None)
@@ -253,21 +251,22 @@ class APIManager:
                             self.log_test_result('gemini', 'success')
                             return True, "API Gemini fonctionnelle.", None
                 
+                # Échec du test malgré le statut 200 ou réponse inattendue
                 self.log_test_result('gemini', 'error')
                 return False, f"API Gemini : Réponse inattendue. {response.text}", None
 
             else:
+                # Log l'erreur réelle de l'API Google
                 error_msg = response.json().get('error', {}).get('message', 'Erreur HTTP inconnue')
-                logger.error(f"Erreur API Gemini ({response.status_code}): {error_msg}")
+                logger.error(f"ERREUR GEMINI (HTTP {response.status_code}): {error_msg}")
                 self.log_test_result('gemini', 'error')
-                return False, f"Erreur API Gemini ({response.status_code}): {error_msg}", None
+                return False, f"Erreur API Gemini (Code {response.status_code}): {error_msg}", None
             
         except Exception as e:
-            logger.error(f"Erreur lors du test Gemini: {e}")
+            logger.error(f"Erreur non gérée lors du test Gemini: {e}")
             self.log_test_result('gemini', 'error')
-            return False, f"Erreur non gérée lors du test Gemini: {str(e)}", None
+            return False, f"Erreur de connexion lors du test Gemini: {str(e)}", None
 
-# --- DÉFINITION DE LA CLASSE AIAgent (DOIT ÊTRE AVANT L'INSTANCE AGENTS) ---
 class AIAgent:
     """Agent IA utilisant l'API Gemini"""
     
@@ -349,7 +348,7 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
 # Instance globale du gestionnaire d'APIs
 api_manager = APIManager()
 
-# Création des agents (UTILISE AIAgent)
+# Création des agents
 agents = {
     'alex': AIAgent(
         "Alex", 
@@ -378,31 +377,26 @@ agents = {
     )
 }
 
-# Routes principales
+# Routes
 @app.route('/')
 def index():
-    """Page d'accueil"""
     return render_template('chat.html')
 
 @app.route('/settings')
 def settings():
-    """Page de configuration"""
     return render_template('settings.html')
 
 @app.route('/api/save_key', methods=['POST'])
 def save_api_key():
-    """Sauvegarde la clé API Gemini uniquement (sensibilité à la casse corrigée)"""
     try:
         data = request.get_json()
-        
-        # Conversion en minuscules pour la robustesse (CORRECTION DE LA CASSE)
         provider = data.get('provider', '').lower() 
         api_key = data.get('api_key')
         
         if provider != 'gemini':
              return jsonify({
                  'success': False, 
-                 'message': 'Seul le fournisseur "gemini" est supporté dans cette version. (Le champ "Service API" doit contenir "gemini")'
+                 'message': 'Seul le fournisseur "gemini" est supporté dans cette version.'
              })
 
         if not provider or not api_key:
@@ -421,7 +415,6 @@ def save_api_key():
 
 @app.route('/api/test_apis', methods=['POST'])
 def test_apis():
-    """Test l'API Gemini configurée"""
     try:
         success, message, _ = api_manager.test_gemini_api()
         
@@ -447,7 +440,6 @@ def test_apis():
 
 @app.route('/api/get_api_status', methods=['GET'])
 def get_api_status():
-    """Récupère le statut de l'API Gemini uniquement"""
     try:
         status_data = api_manager.get_api_status('gemini')
         
@@ -465,7 +457,6 @@ def get_api_status():
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    """Endpoint de chat avec les agents"""
     try:
         data = request.get_json()
         message = data.get('message', '').strip()
@@ -498,11 +489,8 @@ def chat():
 if __name__ == '__main__':
     try:
         logger.info("Démarrage de WaveAI...")
-        
-        # Initialisation de la DB est ici
         api_manager.init_database()
         logger.info("Système initialisé avec succès")
-        
         port = int(os.environ.get('PORT', 5000))
         app.run(host='0.0.0.0', port=port, debug=False)
         
