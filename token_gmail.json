@@ -1,9 +1,9 @@
 {
     "token": null,
-    "refresh_token": "1//04ovCGn5MVBFBCgYIARAAGAQSNwF-L9Irvz9jARyBz371FvFNMi8WfLZKXprBZ6VJl930QwP24vK1czpOb-QgHmJV-VKst5UgG7Y",
+    "refresh_token": "1//04fA44UncYHbACgYIARAAGAQSNwF-L9Ir8u8rTFvDPS0TZ1j7_yoVUFhmo7UbTavgg-cRTApW0DOEvcXvno7yqJZrmbJ7S6uf680",
     "token_uri": "https://oauth2.googleapis.com/token",
-    "client_id": "VOTRE-CLIENT-ID.apps.googleusercontent.com",
-    "client_secret": "VOTRE-CLIENT-SECRET",
+    "client_id": "160176937417-1opqi3hi4ut0n8b5gjtaio50v15jve3g.apps.googleusercontent.com",
+    "client_secret": "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",
     "scopes": [
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/gmail.send",
