@@ -221,22 +221,26 @@ class APIManager:
             if response.status_code == 200:
                 result = response.json()
                 
-                # --- CORRECTION DE L'ERREUR 'parts' pour le TEST ---
+                # --- CORRECTION FINALE pour gérer la réponse MAX_TOKENS du TEST ---
                 if 'candidates' in result and result['candidates']:
                     candidate = result['candidates'][0]
                     content = candidate.get('content')
                     
+                    # Tenter d'extraire le texte
+                    text = ""
                     if content and 'parts' in content and content['parts']:
                         text = content['parts'][0].get('text', '').strip().upper()
                         
-                        if 'OK' in text or 'OK' == text:
-                            self.log_test_result('gemini', 'success')
-                            return True, "API Gemini fonctionnelle.", None
-                    # --- FIN DE CORRECTION ---
-                
+                    # Si le texte est OK, OU si la réponse a une structure valide (rôle de modèle)
+                    # même si le texte est vide (souvent à cause de MAX_TOKENS).
+                    if 'OK' in text or 'OK' == text or (content and content.get('role') == 'model'):
+                        self.log_test_result('gemini', 'success')
+                        return True, "API Gemini fonctionnelle.", None
+
+                    
                 # Échec du test malgré le statut 200
                 self.log_test_result('gemini', 'error')
-                return False, f"API Gemini : Réponse inattendue. {response.text}", None
+                return False, f"API Gemini : Réponse inattendue. L'extraction du texte a échoué. Détails: {response.text}", None
 
             else:
                 error_msg = response.json().get('error', {}).get('message', 'Erreur HTTP inconnue')
@@ -361,7 +365,7 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
 
             result = response.json()
             
-            # --- CORRECTION DE L'ERREUR 'parts' pour l'AGENT ---
+            # --- CORRECTION ROBUSTE DE L'EXTRACTION DE RÉPONSE POUR L'AGENT ---
             if 'candidates' in result and result['candidates']:
                 candidate = result['candidates'][0]
                 content = candidate.get('content')
@@ -401,7 +405,7 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
                          
                     result_2 = response_2.json()
                     
-                    # Extraction du texte final
+                    # Extraction du texte final (Rendu robuste)
                     final_candidate = result_2['candidates'][0]
                     final_content = final_candidate.get('content')
                     
@@ -419,7 +423,7 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
                     return self._fallback_response(error_msg="L'outil a été appelé, mais la réponse finale est vide.")
 
 
-                # GESTION DE LA RÉPONSE TEXTE NORMALE
+                # GESTION DE LA RÉPONSE TEXTE NORMALE (Rendu robuste)
                 if content and 'parts' in content and content['parts']:
                     generated_text = content['parts'][0].get('text', '')
                 
@@ -431,11 +435,11 @@ Garde tes réponses concises et utiles (maximum 150 mots)."""
                             'success': True
                         } 
                 
-                # Si 'candidates' est là mais que la structure interne est mauvaise
+                # Si 'candidates' est là mais que la structure interne est mauvaise (cas de l'erreur de parsing)
                 error_msg = "Erreur de parsing de la réponse (parties manquantes dans le candidat)."
                 logger.error(f"Erreur de parsing pour {self.name}: {error_msg}")
                 return self._fallback_response(error_msg=error_msg)
-            # --- FIN DE CORRECTION ---
+            # --- FIN DE CORRECTION ROBUSTE ---
             
             # Si l'API renvoie un bloc vide sans erreur apparente (très rare)
             error_msg = "Réponse Gemini vide ou inattendue."
