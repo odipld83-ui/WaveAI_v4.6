@@ -1,404 +1,625 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+WaveAI - Système d'Agents IA (Google Gemini ONLY)
+Version: GEMINI V5 (Contexte persistant, Time Injection, JSON API fix)
+"""
+
 import os
 import json
-from flask import Flask, render_template, request, jsonify, redirect, session, url_for
-from google import genai
-from google.genai import types
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
-from datetime import datetime
-import pytz
+import logging
+from datetime import datetime, timezone
+from flask import Flask, render_template, request, jsonify
+import requests
+
+# **[1. NOUVEL IMPORT CRITIQUE]** : Importe les outils depuis tools.py
+try:
+    from tools import AVAILABLE_TOOLS, get_tool_specs
+    TOOLS_AVAILABLE = True
+except ImportError as e:
+    # Fallback si tools.py n'est pas trouvé ou si get_tool_specs manque
+    logging.error(f"Erreur d'importation des outils : {e}. Les agents ne pourront pas utiliser de fonctions.")
+    AVAILABLE_TOOLS = {}
+    TOOLS_AVAILABLE = False
+    
+# -- DATABASE IMPORTS AND CONFIGURATION (POSTGRESQL VERSION) --
+import psycopg2
+from urllib.parse import urlparse
+
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-# Secret de session Flask (CHANGEZ-MOI POUR LA PROD !)
-app.secret_key = 'super_secret_key_pour_la_session' 
+app.secret_key = os.environ.get('SECRET_KEY', 'waveai-secret-key-2024')
 
-# =========================================================================
-# 1. CONFIGURATION DES CLÉS & SCOPES OAuth
-# =========================================================================
+# Configuration de la base de données (PostgreSQL)
+DATABASE_URL = os.environ.get('DATABASE_URL')
 
-# CLÉ GEMINI - À REMPLACER
-GEMINI_API_KEY = "VOTRE_CLE_API_GEMINI"
+# Configuration de l'API Gemini
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}"
 
-# Fichier de secrets pour l'ID Client et Secret (doit être créé)
-CLIENT_SECRETS_FILE = "client_secrets.json"
-
-# Scopes pour les outils :
-# Modification de Gmail (lecture, écriture, suppression)
-GMAIL_SCOPE = ['https://www.googleapis.com/auth/gmail.modify']
-# Événements du calendrier (lecture, écriture, suppression)
-CALENDAR_SCOPE = ['https://www.googleapis.com/auth/calendar.events'] 
-
-# Fichiers de jetons (un par service)
-GMAIL_TOKEN_FILE = 'token_gmail.json'
-CALENDAR_TOKEN_FILE = 'token_calendar.json'
-
-# Initialisation du client Gemini
-try:
-    # Le client ne sera utilisé que si la clé est valide
-    client = genai.Client(api_key=GEMINI_API_KEY)
-except Exception as e:
-    print(f"Erreur d'initialisation de l'API Gemini: {e}")
-    client = None
-
-# =========================================================================
-# 2. OUTILS (FUNCTIONS) POUR LES AGENTS
-# =========================================================================
-
-# --- Outil 1 : Date et Heure Actuelles (pour TOUS les agents) ---
-def get_current_datetime():
-    """
-    Retourne la date et l'heure actuelles (Heure de Paris) au format ISO 8601.
-    Utiliser pour répondre aux questions sur l'heure, la date ou le jour actuel.
-    """
-    tz = pytz.timezone('Europe/Paris')
-    current_time = datetime.now(tz).isoformat()
-    # Retourne toujours une chaîne JSON pour le modèle
-    return json.dumps({"current_datetime": current_time, "timezone": "Europe/Paris"})
-
-# --- Fonctions Utilitaires OAuth (Vérification du statut) ---
-
-def check_gmail_status():
-    """Vérifie si le jeton Gmail existe et est valide."""
-    if os.path.exists(GMAIL_TOKEN_FILE):
-        try:
-            creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_FILE, GMAIL_SCOPE)
-            if not creds.valid:
-                if creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
-                    with open(GMAIL_TOKEN_FILE, 'w') as token:
-                        token.write(creds.to_json())
-                else:
-                    return False
-            return True
-        except Exception:
-            return False
-    return False
-
-def check_calendar_status():
-    """Vérifie si le jeton Google Calendar existe et est valide."""
-    if os.path.exists(CALENDAR_TOKEN_FILE):
-        try:
-            creds = Credentials.from_authorized_user_file(CALENDAR_TOKEN_FILE, CALENDAR_SCOPE)
-            if not creds.valid:
-                if creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
-                    with open(CALENDAR_TOKEN_FILE, 'w') as token:
-                        token.write(creds.to_json())
-                else:
-                    return False
-            return True
-        except Exception:
-            return False
-    return False
-
-
-# --- Fonctions Gmail (pour Alex) ---
-def search_gmail(query: str):
-    """Recherche les 5 derniers emails dans Gmail de l'utilisateur."""
-    if not check_gmail_status():
-        return json.dumps({"status": "error", "message": "Jeton Gmail expiré ou manquant. L'utilisateur doit se connecter via /authorize_gmail."})
+def get_db_connection():
+    """Crée et retourne une connexion à la base de données PostgreSQL."""
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL non défini.")
     
-    try:
-        creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_FILE, GMAIL_SCOPE)
-        service = build('gmail', 'v1', credentials=creds)
+    # Parse l'URL de la base de données (nécessaire pour Render/Heroku)
+    result = urlparse(DATABASE_URL)
+    username = result.username
+    password = result.password
+    database = result.path[1:]
+    hostname = result.hostname
+    port = result.port
+    
+    conn = psycopg2.connect(
+        database=database,
+        user=username,
+        password=password,
+        host=hostname,
+        port=port
+    )
+    return conn
+
+class APIManager:
+    
+    def __init__(self):
+        pass 
         
-        # NOTE: Ceci est une implémentation simulée.
-        # En production, vous feriez l'appel API réel ici.
-        results = service.users().messages().list(userId='me', q=query, maxResults=5).execute()
-        messages = results.get('messages', [])
-        
-        if not messages:
-            return json.dumps({"status": "success", "emails": "Aucun email trouvé correspondant à la requête."})
+    def init_database(self):
+        """
+        Initialise la base de données PostgreSQL (tables) et effectue la migration.
+        """
+        if not DATABASE_URL:
+            logger.error("Initialisation DB échouée: DATABASE_URL non défini.")
+            return
+
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 1. Création de la table api_keys (avec le schéma complet)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS api_keys (
+                        provider TEXT PRIMARY KEY,
+                        api_key TEXT NOT NULL,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        last_tested TIMESTAMP,
+                        test_status TEXT DEFAULT 'untested',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # 2. **CORRECTION DE MIGRATION** : Ajout de la colonne manquante si la table existait
+                try:
+                    cursor.execute("SELECT created_at FROM api_keys LIMIT 0")
+                except psycopg2.ProgrammingError as e:
+                    if 'created_at' in str(e):
+                        conn.rollback()
+                        cursor.execute("ALTER TABLE api_keys ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                        logger.info("Migration DB: Colonne 'created_at' ajoutée à la table api_keys.")
+                    else:
+                        raise 
+
+                # 3. Création de la table scheduled_tasks
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                        id SERIAL PRIMARY KEY,
+                        task_type TEXT NOT NULL,
+                        recipient TEXT NOT NULL,
+                        subject TEXT NOT NULL,
+                        body TEXT NOT NULL,
+                        scheduled_date TIMESTAMP NOT NULL,
+                        status TEXT DEFAULT 'pending',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                conn.commit()
+                logger.info("Base de données PostgreSQL initialisée/mise à jour avec succès")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'initialisation/mise à jour de la base de données PostgreSQL: {e}")
+
+    def save_api_key(self, provider, api_key):
+        """Sauvegarde la clé API."""
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO api_keys (provider, api_key, is_active)
+                    VALUES (%s, %s, TRUE)
+                    ON CONFLICT (provider) DO UPDATE
+                    SET api_key = EXCLUDED.api_key, 
+                        is_active = EXCLUDED.is_active;
+                    """, 
+                    (provider, api_key)
+                )
+                conn.commit()
+                logger.info(f"Clé API sauvegardée pour {provider}")
+                return True
             
-        # Simplification de la réponse pour le modèle
-        return json.dumps({"status": "success", "count": len(messages), "emails_summary": f"Emails trouvés : {len(messages)}. Requête utilisée : {query}"})
+        except Exception as e:
+            logger.error(f"Erreur lors de la sauvegarde de la clé {provider}: {e}")
+            return False
+    
+    def get_api_key(self, provider='gemini'):
+        """Récupère la clé API Gemini."""
+        if provider == 'gemini':
+            env_key = os.getenv('GEMINI_API_KEY')
+            if env_key:
+                return env_key
         
-    except Exception as e:
-        return json.dumps({"status": "error", "message": f"Erreur lors de l'accès à Gmail: {e}"})
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT api_key FROM api_keys 
+                    WHERE provider = %s AND is_active = TRUE
+                ''', (provider,))
+                result = cursor.fetchone()
+                return result[0] if result else None
+        except Exception as e:
+            logger.error(f"Erreur lors de la récupération de la clé {provider}: {e}")
+            return None
+    
+    def get_api_status(self, provider='gemini'):
+        """
+        Récupère le statut de l'API Gemini.
+        Sélectionne uniquement les colonnes critiques pour éviter les erreurs de migration.
+        """
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # REQUÊTE STABILISÉE
+                cursor.execute('''
+                    SELECT api_key, test_status, last_tested 
+                    FROM api_keys 
+                    WHERE provider = %s
+                ''', (provider,))
+                
+                result = cursor.fetchone()
+                
+            key_from_db = result[0] if result else None
+            status = result[1] if result else 'missing'
+            last_tested = result[2] if result else None
+            created_at = None 
+            
+            key_from_env = os.getenv('GEMINI_API_KEY')
+            
+            is_configured = (key_from_db is not None) or (key_from_env is not None)
+            key_to_display = key_from_env if key_from_env else key_from_db
 
-# --- Fonctions Calendar (pour Sofia) ---
-def create_calendar_event(summary: str, description: str, start_datetime: str, end_datetime: str):
-    """Crée un événement dans le calendrier principal de l'utilisateur.
-    Les dates doivent être au format ISO 8601 (ex: 2024-10-03T10:00:00)."""
-    if not check_calendar_status():
-        return json.dumps({"status": "error", "message": "Jeton Calendar expiré ou manquant. L'utilisateur doit se connecter via /authorize_calendar."})
+            return {
+                'configured': is_configured,
+                'key_preview': key_to_display[:8] + '...' if key_to_display and len(key_to_display) > 8 else (key_to_display if key_to_display else 'N/A'),
+                'status': status,
+                'last_tested': last_tested.isoformat() if last_tested else None,
+                'model': GEMINI_MODEL
+            }
+            
+        except Exception as e:
+            logger.error(f"Erreur statut APIs: {e}")
+            return {
+                'configured': False,
+                'key_preview': 'N/A',
+                'status': 'error',
+                'last_tested': None,
+                'model': GEMINI_MODEL
+            }
 
-    try:
-        creds = Credentials.from_authorized_user_file(CALENDAR_TOKEN_FILE, CALENDAR_SCOPE)
-        service = build('calendar', 'v3', credentials=creds)
+    def log_test_result(self, provider, status):
+        """Mettre à jour le statut du test"""
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE api_keys 
+                    SET test_status = %s, last_tested = CURRENT_TIMESTAMP
+                    WHERE provider = %s
+                ''', (status, provider))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Erreur lors de l'enregistrement du test {provider}: {e}")
 
-        event = {
-            'summary': summary,
-            'description': description,
-            'start': {
-                'dateTime': start_datetime, 
-                'timeZone': 'Europe/Paris', # Assurez-vous d'utiliser le bon fuseau horaire
-            },
-            'end': {
-                'dateTime': end_datetime,
-                'timeZone': 'Europe/Paris',
-            },
+    def test_gemini_api(self):
+        """Test simple de l'API Gemini"""
+        api_key = self.get_api_key('gemini')
+        
+        if not api_key:
+            self.log_test_result('gemini', 'missing')
+            return False, "Clé API Gemini introuvable.", None
+        
+        try:
+            logger.info(f"Test du modèle Gemini: {GEMINI_MODEL}")
+            test_prompt = "Dis 'OK' et rien d'autre."
+            url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
+            payload = {
+                "contents": [
+                    {"role": "user", "parts": [{"text": test_prompt}]}
+                ],
+                "generationConfig": { 
+                    "maxOutputTokens": 10,
+                    "temperature": 0.0
+                }
+            }
+            
+            response = requests.post(url, json=payload, timeout=20)
+            
+            if response.status_code == 200:
+                result = response.json()
+                # Vérification plus robuste pour le test
+                if 'candidates' in result and result['candidates']:
+                    content = result['candidates'][0].get('content')
+                    if content and 'parts' in content and content['parts']:
+                        text = content['parts'][0].get('text', '').strip().upper()
+                        if 'OK' in text or 'OK' == text:
+                            self.log_test_result('gemini', 'success')
+                            return True, "API Gemini fonctionnelle.", None
+                
+                # Échec du test malgré le statut 200 ou réponse inattendue
+                self.log_test_result('gemini', 'error')
+                return False, f"API Gemini : Réponse inattendue. {response.text}", None
+
+            else:
+                # Log l'erreur réelle de l'API Google
+                error_msg = response.json().get('error', {}).get('message', 'Erreur HTTP inconnue')
+                logger.error(f"ERREUR GEMINI (HTTP {response.status_code}): {error_msg}")
+                self.log_test_result('gemini', 'error')
+                return False, f"Erreur API Gemini (Code {response.status_code}): {error_msg}", None
+            
+        except Exception as e:
+            logger.error(f"Erreur non gérée lors du test Gemini: {e}")
+            self.log_test_result('gemini', 'error')
+            return False, f"Erreur de connexion lors du test Gemini: {str(e)}", None
+
+class AIAgent:
+    """Agent IA utilisant l'API Gemini"""
+    
+    def __init__(self, name, role, personality):
+        self.name = name
+        self.role = role
+        self.personality = personality
+    
+    # 💡 MODIFICATION : Ajout du paramètre 'history' pour la persistance de contexte
+    def generate_response(self, message, history=[]):
+        """Génère une réponse en utilisant Gemini, supportant le Function Calling et la persistance de contexte."""
+        
+        api_key = api_manager.get_api_key('gemini')
+        if not api_key:
+            return self._fallback_response()
+        
+        # --- NOUVEAU: INJECTION DE L'HEURE ACTUELLE POUR ALEX ---
+        system_instruction_base = f"""Tu es {self.name}, {self.role}.
+Personnalité: {self.personality}
+Réponds de manière naturelle et personnalisée selon ton rôle.
+Garde tes réponses concises et utiles (maximum 150 mots).
+Utilise les fonctions disponibles si elles sont pertinentes pour répondre à la demande de l'utilisateur."""
+
+        system_instruction = system_instruction_base
+        
+        # Le serveur Render est en UTC, utilisons l'heure UTC
+        current_datetime_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+
+        # Instructions supplémentaires UNIQUEMENT pour Alex (gestionnaire de tâches)
+        if self.name.lower() == 'alex':
+            # Cette instruction force l'agent à utiliser la date/heure pour 'maintenant'
+            system_instruction += f"""
+Instructions spécifiques pour la planification: 
+Si l'utilisateur te demande d'envoyer un e-mail 'maintenant' ou 'immédiatement', 
+tu **DOIS** utiliser la date et l'heure actuelle pour l'argument 'scheduled_date_str' de la fonction 'schedule_email_alert'.
+Date et Heure Actuelles (UTC): **{current_datetime_utc}** (Format: YYYY-MM-DD HH:MM).
+Tu **NE DOIS PAS** demander cette information à l'utilisateur si elle est manquante. Utilise {current_datetime_utc} immédiatement.
+"""
+        
+        # --- Historique de la conversation pour le Function Calling ---
+        
+        # 💡 MODIFICATION : Initialisation de l'historique avec l'instruction système
+        conversation_history = [{"role": "user", "parts": [{"text": system_instruction}]}] 
+        
+        # 💡 AJOUT : Ajout de l'historique précédent (fourni par le front-end)
+        for entry in history:
+            # S'assurer que les entrées passées sont au format Gemini
+            if 'role' in entry and 'parts' in entry:
+                conversation_history.append(entry)
+            
+        # 💡 AJOUT : Ajout du message ACTUEL de l'utilisateur
+        conversation_history.append({"role": "user", "parts": [{"text": message}]})
+        
+        try:
+            url = GEMINI_API_URL.format(GEMINI_MODEL, api_key)
+            
+            # **[2. PRÉPARATION DU PAYLOAD INITIAL CORRIGÉ]** : 'tools' est un champ de premier niveau
+            payload = {
+                "contents": conversation_history,
+                "tools": [{"functionDeclarations": get_tool_specs()}] if TOOLS_AVAILABLE else [], 
+                "generationConfig": {
+                    "maxOutputTokens": 1000, 
+                    "temperature": 0.7
+                }
+            }
+            
+            # --- Étape 1 : Appel initial pour voir si un outil est nécessaire ---
+            response = requests.post(url, json=payload, timeout=30)
+            
+            if response.status_code != 200:
+                error_msg = response.json().get('error', {}).get('message', f'Erreur Gemini non détaillée: {response.status_code}')
+                logger.error(f"Erreur Gemini (HTTP {response.status_code}) pour {self.name}: {error_msg}")
+                return self._fallback_response(error_msg=error_msg)
+
+            result = response.json()
+            candidate = result['candidates'][0] if 'candidates' in result and result['candidates'] else None
+            
+            # --- Vérification de l'appel de fonction ---
+            if candidate and 'functionCall' in candidate:
+                function_call = candidate['functionCall']
+                function_name = function_call['name']
+                args = dict(function_call['args'])
+                
+                logger.info(f"Agent {self.name} demande d'appeler la fonction: {function_name} avec args: {args}")
+                
+                if function_name in AVAILABLE_TOOLS:
+                    # **[3. EXÉCUTION DE L'OUTIL]**
+                    tool_function = AVAILABLE_TOOLS[function_name]
+                    
+                    try:
+                        function_result = tool_function(**args)
+                        logger.info(f"Résultat de la fonction {function_name}: {function_result}")
+                        
+                        # --- Étape 2 : Préparation du second appel avec le résultat de l'outil ---
+                        conversation_history.append({
+                            "role": "model",
+                            "parts": [{"functionCall": function_call}]
+                        })
+                        conversation_history.append({
+                            "role": "function",
+                            "parts": [{"functionResponse": {"name": function_name, "response": {"result": function_result}}}]
+                        })
+                        
+                        payload["contents"] = conversation_history
+                        
+                        # --- Étape 3 : Second appel à Gemini pour générer la réponse finale ---
+                        response = requests.post(url, json=payload, timeout=30)
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            candidate = result['candidates'][0] if 'candidates' in result and result['candidates'] else None
+                            
+                            # Récupération de la réponse finale
+                            if candidate and 'content' in candidate and 'parts' in candidate['content'] and candidate['content']['parts']:
+                                generated_text = candidate['content']['parts'][0].get('text')
+                                if generated_text:
+                                    return {
+                                        'agent': self.name,
+                                        'response': generated_text.strip(),
+                                        'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
+                                        'success': True,
+                                        # 💡 AJOUT : Retour de l'historique mis à jour pour le front-end
+                                        'updated_history': conversation_history
+                                    }
+
+                        # Si l'API échoue ou ne donne pas de réponse finale au 2ème appel
+                        logger.error(f"Échec de la réponse finale après appel de l'outil {function_name}.")
+                        return self._fallback_response(error_msg=f"Échec de l'obtention de la réponse finale après l'exécution de l'outil {function_name}.")
+                        
+                    except Exception as tool_e:
+                        logger.error(f"Erreur lors de l'exécution de l'outil {function_name}: {tool_e}")
+                        return self._fallback_response(error_msg=f"Erreur interne de l'outil {function_name}: {str(tool_e)}")
+
+                else:
+                    logger.error(f"Fonction {function_name} demandée par Gemini n'est pas dans AVAILABLE_TOOLS.")
+                    return self._fallback_response(error_msg=f"L'outil {function_name} est introuvable.")
+
+            # --- Cas par défaut : Réponse texte directe (quand l'outil n'est pas nécessaire) ---
+            if candidate and 'content' in candidate and 'parts' in candidate['content'] and candidate['content']['parts']:
+                generated_text = candidate['content']['parts'][0].get('text')
+                if generated_text:
+                    return {
+                        'agent': self.name,
+                        'response': generated_text.strip(),
+                        'provider': f'Google Gemini ({GEMINI_MODEL.split("-")[-1]})',
+                        'success': True,
+                        # 💡 AJOUT : Retour de l'historique mis à jour pour le front-end
+                        'updated_history': conversation_history
+                    }
+
+            # --- GESTION DES BLOCAGES ET ERREURS INATTENDUES ---
+            error_msg = "Réponse Gemini bloquée ou vide. Réessayez avec une autre formulation."
+            logger.error(f"Réponse Gemini Bloquée (JSON complet): {json.dumps(result)}")
+
+            if 'promptFeedback' in result and 'blockReason' in result['promptFeedback']:
+                block_reason = result['promptFeedback']['blockReason']
+                error_msg += f" (Raison: {block_reason})"
+            
+            logger.error(f"Erreur Gemini pour {self.name} (Réponse vide/bloquée) : {error_msg}")
+            return self._fallback_response(error_msg=error_msg)
+            
+        except Exception as e:
+            logger.error(f"Erreur non gérée lors de l'appel Gemini: {e}")
+            return self._fallback_response(error_msg=str(e))
+
+
+    def _fallback_response(self, error_msg=None):
+        """Réponse de fallback lorsque l'API Gemini n'est pas disponible ou échoue"""
+        fallback_responses = {
+            'kai': "Je suis Kai, votre assistant IA. Pour que je puisse vous aider, veuillez configurer la clé API Gemini dans les paramètres.",
+            'alex': "Je suis Alex. Mon accès à l'IA est désactivé. Veuillez configurer l'API Gemini pour débloquer mes conseils de productivité.",
+            'lina': "Je suis Lina. Je ne peux pas analyser votre situation sans l'API Gemini. Configurez la clé pour commencer à travailler !",
+            'marco': "Je suis Marco. Je suis en mode démo. Configurer la clé Gemini me permettra de générer des idées créatives.",
+            'sofia': "Je suis Sofia. Mon planning est en attente. Veuillez configurer l'API Gemini pour optimiser votre organisation."
+        }
+        
+        reason = "Clé API Gemini non configurée."
+        if error_msg:
+            reason = f"Erreur API: {error_msg}"
+        
+        return {
+            'agent': self.name,
+            'response': f"{fallback_responses.get(self.name.lower(), fallback_responses['kai'])} ({reason})",
+            'provider': 'Mode Démo (Gemini non configuré)',
+            'success': False,
+            'updated_history': [] # Ajout du champ pour la cohérence
         }
 
-        # Crée l'événement sur le calendrier 'primary' (principal)
-        event = service.events().insert(calendarId='primary', body=event).execute()
-        return json.dumps({"status": "success", "message": f"Événement créé avec succès: {summary}", "htmlLink": event.get('htmlLink')})
 
-    except Exception as e:
-        return json.dumps({"status": "error", "message": f"Erreur lors de la création de l'événement: {e}"})
+# Instance globale du gestionnaire d'APIs
+api_manager = APIManager()
 
-# Définition de TOUS les outils Python
-PYTHON_TOOLS = [search_gmail, create_calendar_event, get_current_datetime]
-TOOL_NAMES = [t.__name__ for t in PYTHON_TOOLS]
-
-# =========================================================================
-# 3. FLUX OAUTH (GMAIL & CALENDAR)
-# =========================================================================
-
-# --- Fonction utilitaire pour le flux OAuth ---
-def get_oauth_flow(scopes, redirect_route):
-    """Crée l'objet Flow pour le service donné."""
-    return Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE,
-        scopes=scopes,
-        # url_for est essentiel pour générer l'URL complète
-        redirect_uri=url_for(redirect_route, _external=True) 
+# Création des agents
+agents = {
+    'alex': AIAgent(
+        "Alex", 
+        "Assistant productivité et gestion",
+        "Expert en organisation, efficace et méthodique."
+    ),
+    'lina': AIAgent(
+        "Lina",
+        "Experte LinkedIn et réseautage professionnel", 
+        "Professionnelle, stratégique et connectée."
+    ),
+    'marco': AIAgent(
+        "Marco",
+        "Spécialiste des réseaux sociaux et marketing",
+        "Créatif, tendance et engageant."
+    ),
+    'sofia': AIAgent(
+        "Sofia",
+        "Organisatrice de calendrier et planification",
+        "Précise, organisée et anticipatrice."
+    ),
+    'kai': AIAgent(
+        "Kai",
+        "Assistant conversationnel général",
+        "Amical, curieux et adaptable."
     )
-
-# --- Routes OAuth Gmail (Alex) ---
-
-@app.route('/authorize_gmail')
-def authorize_gmail():
-    flow = get_oauth_flow(GMAIL_SCOPE, 'callback_gmail')
-    authorization_url, state = flow.authorization_url(
-        access_type='offline',
-        include_granted_scopes='true'
-    )
-    session['state'] = state
-    return redirect(authorization_url)
-
-@app.route('/callback_gmail')
-def callback_gmail():
-    if 'state' not in session or session['state'] != request.args.get('state'):
-        return "Erreur d'état (CSRF potential)", 400
-
-    flow = get_oauth_flow(GMAIL_SCOPE, 'callback_gmail')
-    try:
-        flow.fetch_token(authorization_response=request.url)
-    except Exception as e:
-        return f"Erreur lors de la récupération du jeton: {e}", 500
-    
-    credentials = flow.credentials
-    with open(GMAIL_TOKEN_FILE, 'w') as token:
-        token.write(credentials.to_json())
-    
-    return "Connexion Gmail réussie ! Alex peut maintenant lire et modifier vos emails. <a href='/'>Retour au Chat</a>"
-
-# --- Routes OAuth Calendar (Sofia) ---
-
-@app.route('/authorize_calendar')
-def authorize_calendar():
-    flow = get_oauth_flow(CALENDAR_SCOPE, 'callback_calendar')
-    authorization_url, state = flow.authorization_url(
-        access_type='offline',
-        include_granted_scopes='true'
-    )
-    session['state'] = state
-    return redirect(authorization_url)
-
-@app.route('/callback_calendar')
-def callback_calendar():
-    if 'state' not in session or session['state'] != request.args.get('state'):
-        return "Erreur d'état (CSRF potential)", 400
-
-    flow = get_oauth_flow(CALENDAR_SCOPE, 'callback_calendar')
-    try:
-        flow.fetch_token(authorization_response=request.url)
-    except Exception as e:
-        return f"Erreur lors de la récupération du jeton: {e}", 500
-    
-    credentials = flow.credentials
-    with open(CALENDAR_TOKEN_FILE, 'w') as token:
-        token.write(credentials.to_json())
-    
-    return "Connexion Google Agenda réussie ! Sofia peut maintenant gérer vos événements. <a href='/'>Retour au Chat</a>"
-
-
-# =========================================================================
-# 4. AGENTS, CHAT ET LOGIQUE PRINCIPALE
-# =========================================================================
-
-# Définition des agents
-AGENT_PROMPTS = {
-    'kai': "Tu es Kai, un assistant général amical et utile. Ton rôle est de répondre aux questions en utilisant tes capacités de recherche sur Internet et de vérifier l'heure actuelle si nécessaire. Réponds brièvement et clairement.",
-    'alex': "Tu es Alex, un assistant spécialisé en productivité. Ton rôle principal est de gérer les emails. Utilise les outils disponibles pour rechercher et modifier les messages Gmail sur demande. Réponds de manière professionnelle.",
-    'sofia': "Tu es Sofia, une organisatrice de calendrier très efficace. Ton rôle est de gérer l'emploi du temps de l'utilisateur. Utilise l'outil `Calendar` pour ajouter des événements à l'agenda de l'utilisateur quand il le demande. Réponds de manière précise sur les dates et heures.",
-    # ... autres agents ...
 }
 
+# Routes
 @app.route('/')
 def index():
-    # Route principale qui rend le template chat.html
     return render_template('chat.html')
 
-@app.route('/api/chat', methods=['POST'])
-def chat():
-    data = request.json
-    message = data.get('message')
-    agent_id = data.get('agent', 'kai')
-    history = data.get('history', [])
+@app.route('/settings')
+def settings():
+    return render_template('settings.html')
 
-    if not client:
-        return jsonify({"success": False, "message": "L'API Gemini n'est pas initialisée (Clé API manquante ou invalide)."}), 500
-
-    # 1. Préparation du modèle et de l'historique
-    system_instruction = AGENT_PROMPTS.get(agent_id, AGENT_PROMPTS['kai'])
-    
-    # Construction de l'historique pour le modèle
-    contents = []
-    for entry in history:
-        role = 'user' if entry['role'] == 'user' else 'model'
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(entry['text'])]))
-        
-    contents.append(types.Content(role='user', parts=[types.Part.from_text(message)]))
-
-    # 2. Détermination des outils disponibles pour l'agent
-    
-    # TOUS les agents ont accès à l'heure actuelle
-    active_tools = [get_current_datetime] 
-    enable_google_search = False 
-    
-    if agent_id == 'kai':
-        # Kai a la recherche Google en plus de l'heure
-        enable_google_search = True
-    elif agent_id == 'alex':
-        # Alex a Gmail en plus de l'heure
-        active_tools.append(search_gmail)
-    elif agent_id == 'sofia':
-        # Sofia a Calendar en plus de l'heure
-        active_tools.append(create_calendar_event)
-    
-    # Paramètres d'exécution
-    config = types.GenerateContentConfig(
-        system_instruction=system_instruction,
-        tools=active_tools if active_tools else None,
-        # Activation de la recherche Google uniquement pour l'agent Kai
-        google_search=enable_google_search 
-    )
-
+@app.route('/api/save_key', methods=['POST'])
+def save_api_key():
     try:
-        # Premier appel à l'API Gemini
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents,
-            config=config,
-        )
-
-        # 3. Boucle Tool-Calling pour les fonctions Python
-        tool_calls = response.function_calls if response.function_calls else []
-        tool_response_parts = []
+        data = request.get_json()
+        provider = data.get('provider', '').lower() 
+        api_key = data.get('api_key')
         
-        while tool_calls:
-            # Ajout des appels d'outils à l'historique pour le prochain appel
-            contents.append(response.candidates[0].content)
+        if provider != 'gemini':
+             return jsonify({
+                 'success': False, 
+                 'message': 'Seul le fournisseur "gemini" est supporté dans cette version.'
+             })
 
-            # Exécution des appels d'outils Python
-            for tool_call in tool_calls:
-                function_name = tool_call.name
-                
-                # Vérification de l'outil et exécution
-                if function_name not in TOOL_NAMES:
-                    tool_output = json.dumps({"status": "error", "message": f"Outil Python non reconnu: {function_name}"})
-                else:
-                    func = next(t for t in PYTHON_TOOLS if t.__name__ == function_name)
-                    
-                    # Exécuter la fonction Python
-                    tool_output = func(**dict(tool_call.args))
-
-                tool_response_parts.append(types.Part.from_function_response(
-                    name=function_name,
-                    response={"result": tool_output}
-                ))
-
-            # Ajout des réponses des outils à l'historique
-            contents.append(types.Content(role="tool", parts=tool_response_parts))
-
-            # Deuxième appel (ou plus) pour obtenir la réponse textuelle
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=contents,
-                config=config,
-            )
-            tool_calls = response.function_calls if response.function_calls else []
-
-        # 4. Nettoyage de l'historique pour l'envoyer au frontend
-        new_history = []
-        for content in contents[:-1]: 
-            if content.role in ['user', 'model']:
-                text = content.parts[0].text
-                new_history.append({'role': content.role, 'text': text})
+        if not provider or not api_key:
+            return jsonify({'success': False, 'message': 'Clé API requise'})
         
-        # 5. Réponse finale
-        return jsonify({
-            "success": True,
-            "agent": agent_id,
-            "response": response.text,
-            "api_working": True,
-            "provider": "Gemini",
-            "history": new_history
-        })
-
-    except Exception as e:
-        print(f"Erreur API Gemini: {e}")
-        return jsonify({"success": False, "message": f"Erreur de l'API: {e}"}), 500
-
-@app.route('/api/get_api_status')
-def get_api_status():
-    """Vérifie l'état des connexions API pour l'affichage dans le chat."""
-    status = 0
-    
-    if os.path.exists(CLIENT_SECRETS_FILE):
-        if check_gmail_status():
-            status += 1
-        if check_calendar_status():
-            status += 1
+        success = api_manager.save_api_key(provider, api_key)
+        
+        if success:
+            return jsonify({'success': True, 'message': f'Clé {provider} sauvegardée. Veuillez cliquer sur "Tester l\'API" pour vérifier.'})
+        else:
+            return jsonify({'success': False, 'message': 'Erreur lors de la sauvegarde'})
             
-    return jsonify({
-        "success": True, 
-        "total_configured": status, 
-    })
+    except Exception as e:
+        logger.error(f"Erreur sauvegarde clé: {e}")
+        return jsonify({'success': False, 'message': str(e)})
 
 @app.route('/api/test_apis', methods=['POST'])
 def test_apis():
-    """Teste si les connexions Gmail et Calendar sont actives (utilisé par le front-end)."""
-    total = 2
-    working = 0
+    try:
+        success, message, _ = api_manager.test_gemini_api()
+        
+        return jsonify({
+            'success': True,
+            'results': {
+                'gemini': {
+                    'success': success,
+                    'message': message,
+                    'tested_at': datetime.now().isoformat()
+                }
+            },
+            'summary': {
+                'total': 1,
+                'working': 1 if success else 0,
+                'failed': 0 if success else 1
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Erreur test APIs: {e}")
+        return jsonify({'success': False, 'message': str(e)})
 
-    if check_gmail_status():
-        working += 1
-    
-    if check_calendar_status():
-        working += 1
+@app.route('/api/get_api_status', methods=['GET'])
+def get_api_status():
+    try:
+        status_data = api_manager.get_api_status('gemini')
+        
+        return jsonify({
+            'success': True,
+            'apis': {
+                'gemini': status_data
+            },
+            'total_configured': 1 if status_data['configured'] else 0
+        })
+        
+    except Exception as e:
+        logger.error(f"Erreur statut APIs: {e}")
+        return jsonify({'success': False, 'message': str(e)})
 
-    return jsonify({
-        "success": True,
-        "summary": {
-            "total": total,
-            "working": working
-        }
-    })
-
-# =========================================================================
-# 5. EXÉCUTION
-# =========================================================================
+# 💡 MODIFICATION : Ajout de la gestion de l'historique dans le payload de la route /api/chat
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    try:
+        data = request.get_json()
+        message = data.get('message', '').strip()
+        agent_name = data.get('agent', 'kai').lower()
+        # 💡 AJOUT : Récupération de l'historique de la conversation depuis le front-end
+        history = data.get('history', []) 
+        
+        if not message:
+            return jsonify({'success': False, 'message': 'Message vide'})
+        
+        if agent_name not in agents:
+            agent_name = 'kai'
+        
+        agent = agents[agent_name]
+        # 💡 MODIFICATION : Passage de l'historique à la fonction de génération
+        response_data = agent.generate_response(message, history) 
+        
+        # 💡 MODIFICATION : Le front-end doit utiliser 'updated_history' pour le prochain tour
+        return jsonify({
+            'success': True,
+            'agent': response_data['agent'],
+            'response': response_data['response'],
+            'provider': response_data['provider'],
+            'api_working': response_data['success'],
+            'history': response_data.get('updated_history', []) # Renvoie l'historique mis à jour
+        })
+        
+    except Exception as e:
+        logger.error(f"Erreur chat: {e}")
+        return jsonify({
+            'success': False, 
+            'message': f'Erreur lors du traitement: {str(e)}',
+            'history': history # Renvoie l'historique non modifié en cas d'erreur
+        })
 
 if __name__ == '__main__':
-    # Initialisation du fichier client_secrets si manquant pour les tests
-    if not os.path.exists(CLIENT_SECRETS_FILE):
-        print("!!! ATTENTION !!! Le fichier 'client_secrets.json' est manquant.")
-        print("Veuillez le créer avec vos identifiants Google Cloud pour les fonctionnalités Gmail/Calendar.")
+    try:
+        logger.info("Démarrage de WaveAI...")
+        api_manager.init_database()
+        logger.info("Système initialisé avec succès")
+        port = int(os.environ.get('PORT', 5000))
+        app.run(host='0.0.0.0', port=port, debug=False)
         
-    # Ceci n'est utilisé que pour le développement local, Gunicorn s'en charge en production.
-    app.run(debug=True)
+    except Exception as e:
+        logger.error(f"Erreur critique au démarrage: {e}")
+        raise
