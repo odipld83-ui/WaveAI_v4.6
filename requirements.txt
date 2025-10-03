@@ -1,9 +1,7 @@
 Flask
-requests
-gunicorn
-# Dépendances pour PostgreSQL (Base de données stable et partagée)
-psycopg2-binary
-# Dépendances pour les API Google (Gmail, Gemini Auth)
-google-api-python-client
+google-genai
+google-auth
 google-auth-oauthlib
-google-auth-httplib2
+google-api-python-client
+pytz
+gunicorn
