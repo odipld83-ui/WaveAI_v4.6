@@ -25,7 +25,9 @@ GEMINI_API_KEY = "VOTRE_CLE_API_GEMINI"
 CLIENT_SECRETS_FILE = "client_secrets.json"
 
 # Scopes pour les outils :
+# Modification de Gmail (lecture, écriture, suppression)
 GMAIL_SCOPE = ['https://www.googleapis.com/auth/gmail.modify']
+# Événements du calendrier (lecture, écriture, suppression)
 CALENDAR_SCOPE = ['https://www.googleapis.com/auth/calendar.events'] 
 
 # Fichiers de jetons (un par service)
@@ -34,6 +36,7 @@ CALENDAR_TOKEN_FILE = 'token_calendar.json'
 
 # Initialisation du client Gemini
 try:
+    # Le client ne sera utilisé que si la clé est valide
     client = genai.Client(api_key=GEMINI_API_KEY)
 except Exception as e:
     print(f"Erreur d'initialisation de l'API Gemini: {e}")
@@ -51,9 +54,11 @@ def get_current_datetime():
     """
     tz = pytz.timezone('Europe/Paris')
     current_time = datetime.now(tz).isoformat()
+    # Retourne toujours une chaîne JSON pour le modèle
     return json.dumps({"current_datetime": current_time, "timezone": "Europe/Paris"})
 
-# --- Fonctions Gmail (pour Alex) ---
+# --- Fonctions Utilitaires OAuth (Vérification du statut) ---
+
 def check_gmail_status():
     """Vérifie si le jeton Gmail existe et est valide."""
     if os.path.exists(GMAIL_TOKEN_FILE):
@@ -71,24 +76,6 @@ def check_gmail_status():
             return False
     return False
 
-def search_gmail(query: str):
-    """Recherche les 5 derniers emails dans Gmail de l'utilisateur."""
-    if not check_gmail_status():
-        return json.dumps({"status": "error", "message": "Jeton Gmail expiré ou manquant. L'utilisateur doit se reconnecter."})
-    
-    try:
-        creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_FILE, GMAIL_SCOPE)
-        service = build('gmail', 'v1', credentials=creds)
-        
-        # Le reste du code de recherche Gmail (simulé)
-        # ...
-        
-        return json.dumps({"status": "success", "emails": "Résultats de la recherche Gmail (simulé) pour : " + query})
-        
-    except Exception as e:
-        return json.dumps({"status": "error", "message": f"Erreur lors de l'accès à Gmail: {e}"})
-
-# --- Fonctions Calendar (pour Sofia) ---
 def check_calendar_status():
     """Vérifie si le jeton Google Calendar existe et est valide."""
     if os.path.exists(CALENDAR_TOKEN_FILE):
@@ -106,10 +93,37 @@ def check_calendar_status():
             return False
     return False
 
+
+# --- Fonctions Gmail (pour Alex) ---
+def search_gmail(query: str):
+    """Recherche les 5 derniers emails dans Gmail de l'utilisateur."""
+    if not check_gmail_status():
+        return json.dumps({"status": "error", "message": "Jeton Gmail expiré ou manquant. L'utilisateur doit se connecter via /authorize_gmail."})
+    
+    try:
+        creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_FILE, GMAIL_SCOPE)
+        service = build('gmail', 'v1', credentials=creds)
+        
+        # NOTE: Ceci est une implémentation simulée.
+        # En production, vous feriez l'appel API réel ici.
+        results = service.users().messages().list(userId='me', q=query, maxResults=5).execute()
+        messages = results.get('messages', [])
+        
+        if not messages:
+            return json.dumps({"status": "success", "emails": "Aucun email trouvé correspondant à la requête."})
+            
+        # Simplification de la réponse pour le modèle
+        return json.dumps({"status": "success", "count": len(messages), "emails_summary": f"Emails trouvés : {len(messages)}. Requête utilisée : {query}"})
+        
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"Erreur lors de l'accès à Gmail: {e}"})
+
+# --- Fonctions Calendar (pour Sofia) ---
 def create_calendar_event(summary: str, description: str, start_datetime: str, end_datetime: str):
-    """Crée un événement dans le calendrier principal de l'utilisateur."""
+    """Crée un événement dans le calendrier principal de l'utilisateur.
+    Les dates doivent être au format ISO 8601 (ex: 2024-10-03T10:00:00)."""
     if not check_calendar_status():
-        return json.dumps({"status": "error", "message": "Jeton Calendar expiré ou manquant. L'utilisateur doit se reconnecter."})
+        return json.dumps({"status": "error", "message": "Jeton Calendar expiré ou manquant. L'utilisateur doit se connecter via /authorize_calendar."})
 
     try:
         creds = Credentials.from_authorized_user_file(CALENDAR_TOKEN_FILE, CALENDAR_SCOPE)
@@ -119,8 +133,8 @@ def create_calendar_event(summary: str, description: str, start_datetime: str, e
             'summary': summary,
             'description': description,
             'start': {
-                'dateTime': start_datetime, # format ISO: 'YYYY-MM-DDTHH:MM:SS'
-                'timeZone': 'Europe/Paris', # Adapter si nécessaire
+                'dateTime': start_datetime, 
+                'timeZone': 'Europe/Paris', # Assurez-vous d'utiliser le bon fuseau horaire
             },
             'end': {
                 'dateTime': end_datetime,
@@ -128,8 +142,9 @@ def create_calendar_event(summary: str, description: str, start_datetime: str, e
             },
         }
 
+        # Crée l'événement sur le calendrier 'primary' (principal)
         event = service.events().insert(calendarId='primary', body=event).execute()
-        return json.dumps({"status": "success", "message": f"Événement créé. ID: {event.get('id')}", "htmlLink": event.get('htmlLink')})
+        return json.dumps({"status": "success", "message": f"Événement créé avec succès: {summary}", "htmlLink": event.get('htmlLink')})
 
     except Exception as e:
         return json.dumps({"status": "error", "message": f"Erreur lors de la création de l'événement: {e}"})
@@ -139,7 +154,7 @@ PYTHON_TOOLS = [search_gmail, create_calendar_event, get_current_datetime]
 TOOL_NAMES = [t.__name__ for t in PYTHON_TOOLS]
 
 # =========================================================================
-# 3. FLUX OAUTH (GMAIL & CALENDAR) - INCHANGÉ
+# 3. FLUX OAUTH (GMAIL & CALENDAR)
 # =========================================================================
 
 # --- Fonction utilitaire pour le flux OAuth ---
@@ -148,7 +163,8 @@ def get_oauth_flow(scopes, redirect_route):
     return Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=scopes,
-        redirect_uri=url_for(redirect_route, _external=True)
+        # url_for est essentiel pour générer l'URL complète
+        redirect_uri=url_for(redirect_route, _external=True) 
     )
 
 # --- Routes OAuth Gmail (Alex) ---
@@ -224,6 +240,7 @@ AGENT_PROMPTS = {
 
 @app.route('/')
 def index():
+    # Route principale qui rend le template chat.html
     return render_template('chat.html')
 
 @app.route('/api/chat', methods=['POST'])
@@ -234,7 +251,7 @@ def chat():
     history = data.get('history', [])
 
     if not client:
-        return jsonify({"success": False, "message": "L'API Gemini n'est pas initialisée."}), 500
+        return jsonify({"success": False, "message": "L'API Gemini n'est pas initialisée (Clé API manquante ou invalide)."}), 500
 
     # 1. Préparation du modèle et de l'historique
     system_instruction = AGENT_PROMPTS.get(agent_id, AGENT_PROMPTS['kai'])
@@ -249,7 +266,7 @@ def chat():
 
     # 2. Détermination des outils disponibles pour l'agent
     
-    # Tous les agents ont accès à l'heure actuelle
+    # TOUS les agents ont accès à l'heure actuelle
     active_tools = [get_current_datetime] 
     enable_google_search = False 
     
@@ -267,11 +284,12 @@ def chat():
     config = types.GenerateContentConfig(
         system_instruction=system_instruction,
         tools=active_tools if active_tools else None,
-        # Activation de la recherche Google uniquement si enable_google_search est True
+        # Activation de la recherche Google uniquement pour l'agent Kai
         google_search=enable_google_search 
     )
 
     try:
+        # Premier appel à l'API Gemini
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=contents,
@@ -283,27 +301,21 @@ def chat():
         tool_response_parts = []
         
         while tool_calls:
-            # Ajout des appels d'outils à l'historique
+            # Ajout des appels d'outils à l'historique pour le prochain appel
             contents.append(response.candidates[0].content)
 
             # Exécution des appels d'outils Python
             for tool_call in tool_calls:
                 function_name = tool_call.name
                 
-                # Validation des outils avant l'appel (sécurité)
+                # Vérification de l'outil et exécution
                 if function_name not in TOOL_NAMES:
                     tool_output = json.dumps({"status": "error", "message": f"Outil Python non reconnu: {function_name}"})
                 else:
                     func = next(t for t in PYTHON_TOOLS if t.__name__ == function_name)
                     
-                    # Vérification de l'état de la connexion OAuth (pour Alex et Sofia)
-                    if function_name == 'search_gmail' and not check_gmail_status():
-                        tool_output = json.dumps({"status": "error", "message": f"ALEX: Erreur de connexion Gmail. Veuillez vous connecter via /authorize_gmail"})
-                    elif function_name == 'create_calendar_event' and not check_calendar_status():
-                        tool_output = json.dumps({"status": "error", "message": f"SOFIA: Erreur de connexion Calendar. Veuillez vous connecter via /authorize_calendar"})
-                    else:
-                        # Exécuter la fonction Python
-                        tool_output = func(**dict(tool_call.args))
+                    # Exécuter la fonction Python
+                    tool_output = func(**dict(tool_call.args))
 
                 tool_response_parts.append(types.Part.from_function_response(
                     name=function_name,
@@ -313,7 +325,7 @@ def chat():
             # Ajout des réponses des outils à l'historique
             contents.append(types.Content(role="tool", parts=tool_response_parts))
 
-            # Appel final pour obtenir la réponse textuelle
+            # Deuxième appel (ou plus) pour obtenir la réponse textuelle
             response = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=contents,
@@ -358,6 +370,26 @@ def get_api_status():
         "total_configured": status, 
     })
 
+@app.route('/api/test_apis', methods=['POST'])
+def test_apis():
+    """Teste si les connexions Gmail et Calendar sont actives (utilisé par le front-end)."""
+    total = 2
+    working = 0
+
+    if check_gmail_status():
+        working += 1
+    
+    if check_calendar_status():
+        working += 1
+
+    return jsonify({
+        "success": True,
+        "summary": {
+            "total": total,
+            "working": working
+        }
+    })
+
 # =========================================================================
 # 5. EXÉCUTION
 # =========================================================================
@@ -368,4 +400,5 @@ if __name__ == '__main__':
         print("!!! ATTENTION !!! Le fichier 'client_secrets.json' est manquant.")
         print("Veuillez le créer avec vos identifiants Google Cloud pour les fonctionnalités Gmail/Calendar.")
         
+    # Ceci n'est utilisé que pour le développement local, Gunicorn s'en charge en production.
     app.run(debug=True)
